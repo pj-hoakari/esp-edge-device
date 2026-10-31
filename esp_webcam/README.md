@@ -181,6 +181,15 @@ git submodule update --init --recursive
 
 `.tools/esp-idf`はsubmoduleにせず、通常のIDFインストールまたはローカル取得を使う。
 
+### リポジトリ管理
+
+- ルートの設計リポジトリにはKiCad設計、`docs/`、`exports/`、ファームウェアをコミットする。
+- `vendor/`の2リポジトリはsubmodule。親リポジトリが記録するのはコミットSHAのみなので、
+  依存を更新するときはsubmodule側でcheckoutし、親で`git add esp_webcam/vendor/...`する。
+- `.tools/`（ESP-IDFローカル取得）、`build/`、`managed_components/`、`sdkconfig`、`certs/`、
+  KiCadのバックアップ・自動保存・ロックファイルは追跡しない。
+- Wi-Fi認証情報は`sdkconfig`にのみ置き、共有しない。
+
 ## ビルドと起動
 
 1. ESP-IDF v6.1のPowerShell環境を開く。ターゲットは`esp32s3`。
