@@ -1,5 +1,25 @@
 export const MAX_FRAME = 256 * 1024;
 export const CHUNK = 12000;
+export const DEFAULT_STUN_URL = 'stun:stun.l.google.com:19302';
+
+// The viewer server publishes the STUN server it expects the ESP to use. An
+// explicit empty list from /ice means host candidates only, so do not override it.
+export async function fetchIceConfig(signal) {
+  try {
+    const res = await fetch('/ice', { cache: 'no-store', signal });
+    if (!res.ok) throw new Error(`ICE config HTTP ${res.status}`);
+    const cfg = await res.json();
+    if (Array.isArray(cfg?.iceServers)) {
+      return {
+        iceServers: cfg.iceServers,
+        iceTransportPolicy: cfg.iceTransportPolicy === 'relay' ? 'relay' : 'all',
+      };
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') return null;
+  }
+  return { iceServers: [{ urls: [DEFAULT_STUN_URL] }], iceTransportPolicy: 'all' };
+}
 
 // One bounded frame in memory. Unordered delivery and duplicate chunks are supported.
 export class JpegAssembler {
@@ -58,7 +78,9 @@ if (typeof document !== 'undefined') {
     disconnect(); const run = generation;
     document.querySelector('#connect').disabled = true;
     abort = new AbortController(); const signal = abort.signal;
-    const connection = new RTCPeerConnection({ iceServers: [] }); pc = connection;
+    const iceConfig = await fetchIceConfig(signal);
+    if (run !== generation || !iceConfig) return;
+    const connection = new RTCPeerConnection(iceConfig); pc = connection;
     let channel = null;
     connection.createDataChannel('control');
 
@@ -110,28 +132,35 @@ if (typeof document !== 'undefined') {
       if(run === generation && channel?.readyState !== 'open') status.textContent = 'ICE: ' + connection.iceConnectionState + ' / DTLS: ' + connection.connectionState;
     };
     connection.onconnectionstatechange = () => {
-      if (run === generation && ['failed', 'disconnected', 'closed'].includes(connection.connectionState)) {
-        disconnect(); status.textContent = '接続が終了しました。接続ボタンで再接続できます。';
+      // Do not tear the session down automatically: ICE may recover, and the
+      // user may still be waiting for the ESP. Only report the state.
+      if (run === generation && ['failed', 'disconnected'].includes(connection.connectionState)) {
+        status.textContent = `接続状態: ${connection.connectionState}（切断はしていません）`;
       }
     };
     try {
-      status.textContent = 'ICE候補を収集中…';
+      status.textContent = iceConfig.iceServers.length
+        ? 'STUN/ICE候補を収集中…'
+        : 'ICE候補を収集中（STUNなし）…';
       await connection.setLocalDescription(await connection.createOffer());
-      await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => finish(new Error('ICE収集タイムアウト')), 10000);
-        const finish = error => { clearTimeout(timer); connection.onicegatheringstatechange = null; error ? reject(error) : resolve(); };
+      // Proceed with the candidates gathered so far if STUN is slow or blocked;
+      // host candidates are already in localDescription and keep LAN working.
+      await new Promise(resolve => {
+        let timer = null;
+        const finish = () => { if (timer !== null) clearTimeout(timer); connection.onicegatheringstatechange = null; resolve(); };
+        timer = setTimeout(finish, 15000);
         connection.onicegatheringstatechange = () => { if (connection.iceGatheringState === 'complete') finish(); };
         if (connection.iceGatheringState === 'complete') finish();
       });
       if (run !== generation) return;
-      let res = await fetch('/offer', { method: 'POST', body: connection.localDescription.sdp, signal });
+      let res = await fetch('/api/offer', { method: 'POST', body: connection.localDescription.sdp, signal });
       if (!res.ok) throw new Error(`Offer HTTP ${res.status}`);
       const id = (await res.text()).trim();
       status.textContent = 'ESP32の応答を待っています…';
-      const until = performance.now() + 20000;
+      const until = performance.now() + 30000;
       let sdp = null;
       while (performance.now() < until) {
-        res = await fetch(`/answer?id=${encodeURIComponent(id)}`, { cache: 'no-store', signal });
+        res = await fetch(`/api/answer?id=${encodeURIComponent(id)}`, { cache: 'no-store', signal });
         if (res.status === 200) { sdp = await res.text(); break; }
         if (res.status !== 202) throw new Error(`Answer HTTP ${res.status}`);
         await new Promise(resolve => setTimeout(resolve, 250));
@@ -142,7 +171,7 @@ if (typeof document !== 'undefined') {
       setTimeout(() => {
         if (run === generation && channel?.readyState !== 'open') {
           const phase = 'ICE=' + connection.iceConnectionState + ', DTLS=' + connection.connectionState;
-          disconnect(); status.textContent = '接続タイムアウト: ' + phase;
+          status.textContent = '映像チャンネル待ち（接続は維持）: ' + phase;
         }
       }, 15000);
     } catch (e) {

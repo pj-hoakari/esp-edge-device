@@ -1,14 +1,12 @@
 <!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>ESP32-S3 UVC MJPEG確認</title>
 <style>body{font:16px system-ui;max-width:1000px;margin:32px auto;padding:0 20px;background:#101820;color:#e5eef4}img{display:block;width:100%;background:#05090c;min-height:180px;margin:16px 0}pre{white-space:pre-wrap;background:#182733;padding:16px;border-radius:8px}button{padding:10px 20px;margin-right:10px}</style>
-<h1>UVCカメラ確認 / MJPEG</h1><p>カラーJPEG・目標6fps以上。この画面は診断用のHTTP映像です。</p>
-<p><a id="rtc" style="color:#80d8ff">WebRTC配信を開く</a></p>
+<h1>UVCカメラ確認 / MJPEG</h1><p>カラーJPEG・目標6fps以上。この画面は診断用のHTTP映像です。WebRTCビューアーは別のNodeサーバーから開きます。</p>
 <button id="start">映像を再接続</button><button id="stop">映像を停止</button>
 <h2 id="state">カメラ状態を確認中…</h2><img id="video" alt="カメラ映像待機中"><pre id="status"></pre>
 <p>カメラ未接続・受信停止時は状態欄を確認してください。配信途中で抜いた場合、最後の画像が残ることがあります。</p>
 <script>
 const video=document.querySelector('#video'),state=document.querySelector('#state'),details=document.querySelector('#status');
-const rtcUrl=new URL(location.href);rtcUrl.protocol='https:';rtcUrl.port='443';rtcUrl.pathname='/';document.querySelector('#rtc').href=rtcUrl.href;
 function start(){const u=new URL(location.href);u.port='81';u.pathname='/stream';u.search='t='+Date.now();video.src=u.href;}
 document.querySelector('#start').onclick=start;document.querySelector('#stop').onclick=()=>video.removeAttribute('src');
 let previous=null;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { JpegAssembler, CHUNK, MAX_FRAME, motionScore } from '../main/web/receiver.js';
+import { JpegAssembler, CHUNK, MAX_FRAME, motionScore } from '../public/receiver.js';
 function packet(id, jpeg, offset) {
   const n = Math.min(CHUNK, jpeg.length - offset), b = new ArrayBuffer(20 + n), v = new DataView(b);
   v.setUint32(0, 0x3147504a, true); v.setUint32(4, id, true);

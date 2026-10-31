@@ -2,11 +2,16 @@
 
 ## 開発中の6fps WebRTC改善版
 
-最新目標は1280×720カラー・6fps以上。改善版はHTTPS 443でWebRTC DataChannel、
+最新目標は1280×720カラー・6fps以上。改善版はWebRTC DataChannelで映像を送り、
 HTTP 80/81でカメラ診断とMJPEGを同時に提供する。起動元は`mjpeg_main.c`で、
 同じカメラの最新JPEGを独立したシーケンスで購読するため、MJPEGとWebRTCがフレームを奪い合わない。
 WebRTCは`main.c`の`webrtc_start()`から起動する。診断用MJPEGを同時再生するとWi-Fi帯域を使うため、
 WebRTCが開通するとMJPEG送信は自動で休止して帯域を優先する。
+
+ESPはビューアー画面を配信しない。PCなどで`viewer-server`を起動し、ブラウザはそこから
+画面とスクリプトを受け取る。ESPとビューアーはそのNodeサーバーを介してSDPを交換し、
+ICEはSTUNでサーバー再帰候補を集める。シグナリングはHTTPポーリングで、ESPが
+`/api/esp/offer`を取得してanswerを`/api/esp/answer`へPOSTする。
 
 - JPEG内部のマーカーと寸法・3色成分を検査し、EOIより後ろのUSB/DMA整列データは長さを問わず無視する。
   返すJPEGはEOIまでとする。JPEG本体の欠損やセグメント長異常は修復扱いで通さない。
@@ -20,41 +25,62 @@ WebRTCが開通するとMJPEG送信は自動で休止して帯域を優先する
 - 解像度は**1280×720（HD）固定**。UVC設定で解像度を落とす項目は持たない。
   帯域はフレームレート（目標6fps、静止時2fps）と同一フレーム抑制で削減する。
 - AES-128-GCM優先、WebRTCタスクをCPU1へ配置、SCTP送信キャッシュ128KiB、
-  HTTP/HTTPS/ICE併用のためソケット上限20。再圧縮はまだ追加していない。
-- 直接LAN接続では、HTTPシグナリング送信元IPv4で`.local`ホスト候補を展開する。
+  HTTP/ICE併用のためソケット上限20。再圧縮はまだ追加していない。
+- 直接LAN接続では、`.local`ホスト候補を到達可能なIPv4へ展開する。ビューアーをlocalhostで
+  開いた場合はESPと同一サブネットのPC側IPv4を使う。`a=candidate:`行の接頭辞は保持する。
   ブラウザのプライバシー設定は変更しない。リバースプロキシやLAN外接続はこの処理の対象外。
 
-6fpsを達成したという実機結果はまだない。書き込み後にUVC有効JPEG率・WebRTC受信fps・
-静止時の実効fps・JPEGデコードを測定し、必要ならカメラ側のMJPEG品質制御を含めて次の改善を選ぶ。
+2026-10-31にDataChannel経由のカラーHD映像を実機で確認した。`/rtc-status`は
+`peer_state:10`、`channel_open:true`、`sent_frames:105`、`acked_frames:79`、
+`last_ack_rtt_ms:120`、`effective_fps:2`、`client_motion:3`。ブラウザ表示も確認済み。
 
-改善版はESP-IDF v6.1でビルド・リンク成功（app 1,185,168 bytes）。
+改善版はESP-IDF v6.1でビルド・リンク成功（app 1,188,272 bytes、0x1221b0）。
 JPEG解析実コードのPCテスト（末尾0〜16バイト・破棄理由を含む）と
-DataChannel受信・断片復元・動きスコアのテスト5件が成功。
+DataChannel受信・断片復元・動きスコア・シグナリング中継・候補展開のテスト9件が成功。
 libwebrtc M106ベースの`@roamhq/wrtc` 0.10.0による検証クライアントも用意し、起動を確認した。
-現時点ではPCにESPのCOMポートが出ていないため、改善版の書き込みと実機測定は未実施。
 
 ## 現在の動作：HTTP MJPEGとカメラ診断
 
 2026-10-31、カメラ受信の切り分けのため既定ビルドを`main/mjpeg_main.c`へ切り替えた。
-WebRTCの送信処理は`main/main.c`、受信画面は`main/web/index.html`・`receiver.js`にあり、
-同じビルドからHTTPS側で起動する。Wi-Fiのローカル設定、既定720p MJPEG・10fps受信、
+WebRTCの送信処理は`main/main.c`にあり、HTTP 80の診断サーバーと同じビルドから起動する。
+受信画面はプロジェクトルートの`viewer-server/`（Node.js、追加パッケージ不要）から配信する。
+Wi-Fiのローカル設定、既定720p MJPEG・10fps受信、
 VID:PID=349C:3307は引き継ぐ（fpsはKconfigで変更可能、解像度はHD固定）。
 
 - 画面：`http://<ESPのIP>/`（**httpsではなくhttp**）
 - カメラ診断JSON：`http://<ESPのIP>/status`
-- USB・UVCの直近ログ：`http://<ESPのIP>/usb-log`（修正版。Wi-Fiログは含めない）
+- USB・UVCの直近ログ：`http://<ESPのIP>/usb-log`（USB系のみ）
+- WebRTC/DTLSの直近ログ：`http://<ESPのIP>/log`（`DTLS`・`esp_peer`・`SCTP`・`ICE`・`webcam:`）
 - MJPEG映像：`http://<ESPのIP>:81/stream`
 
 `/status`はUSB機器数、UVC検出回数、オープン結果、JPEG受信件数・寸法・サイズ・受信fps・
 送信目標fps・Idle FPS・動きしきい値、不正JPEGの理由別カウンタ、バッファ超過・転送エラーを返す。
 `/rtc-status`はDataChannel接続、送信数、重複排除・stale破棄・ACK統計に加え、
-`effective_fps`（現在の実効送信fps）、`client_motion`（直近の動きスコア）、`idle_fps`を返す。
+`effective_fps`（現在の実効送信fps）、`client_motion`（直近の動きスコア）を返す。
 USB機器数とUVC検出は別の段階である。
 UVC検出回数は起動後の累計なので、現在接続されているかはUSB機器数・状態・最終受信時刻も見る。
 MJPEG用と画面・診断用にHTTPサーバーを分け、配信中も診断を取得できる。
 映像閲覧は1台を想定。カメラがなくても診断画面は開き、映像は待機する。
 カメラを途中で外すと最後の画像が残ることがあるが、状態欄は受信停止を示す。
-WebRTCのICE/DTLS成功後にSCTP/DataChannelが開かない問題は、今回のMJPEG確認とは分けて扱う。
+以前の「ICE/DTLS成功後にSCTP/DataChannelが開かない」問題は、未送信バグとサーバーの
+候補展開バグを修正して解消済み。切り分けには`/log`を使う。
+
+### ビューアーとシグナリングサーバー
+
+`viewer-server/`をPCで起動し、ブラウザで`http://<PCのIP>:8080/`を開く。
+サーバーは画面・`receiver.js`・SDP中継・STUN設定を提供する。
+
+```powershell
+Set-Location <リポジトリ>\viewer-server
+$env:STUN_URL='stun:stun.l.google.com:19302'
+npm start
+```
+
+ESPのmenuconfigでは`ESP webcam`の`Node signaling server base URL`に
+`http://<PCのIP>:8080`、`STUN server URL`に同じSTUNを設定する。空にするとWebRTCを無効化できる。
+ビューアーの`.local`ホスト候補は、サーバーが到達可能なPC側IPv4へ置換してESPへ渡す
+（localhost接続時はESPと同一サブネットのアドレスを選ぶ）。`a=candidate:`行は保持される。
+詳しいAPIと環境変数は[viewer-server/README.md](../../viewer-server/README.md)を参照。
 
 この確認版はESP-IDF v6.1でビルド・リンク成功（app 921,296 bytes）、
 COM11のESP32-S3へ書き込み、bootloader・partition table・appのハッシュ照合に成功した。
@@ -118,12 +144,12 @@ USB UVC MJPEG camera → USB Full Speed host → latest JPEG in PSRAM
  → JPEG復元 → ブラウザJPEGデコード → canvas
 ```
 
-映像トラック、H.264エンコード、音声は使わない。ESP内蔵HTTPSサーバーが
-画面とSDPシグナリングを提供する。ブラウザがofferを作り、ESPがanswerを返す。
+映像トラック、H.264エンコード、音声は使わない。ブラウザがofferを作り、Nodeの
+`viewer-server`がESPへ中継し、ESPがanswerを返す。ESPはHTTPポーリングでofferを取得する。
 ICE収集完了後のSDPを交換し、trickle ICEは使わない。
-STUN/TURNは未設定で、同一LAN・端末間通信が可能なWi-Fiが前提。
-インターネット越しの接続、認証付きの複数ユーザーサービスは対象外。
-HTTPSシグナリングのサーバー証明書とWebRTC DTLS用証明書は別物。
+ICEはSTUNでサーバー再帰候補を収集する。TURN中継は未実装で、同一LAN・
+端末間通信が可能なWi-Fiが前提。インターネット越しの接続、認証付きの
+複数ユーザーサービスは対象外。STUNが使えない場合はホスト候補のみで接続する。
 
 ## カメラ・基板の成立条件
 
@@ -204,16 +230,15 @@ git submodule update --init --recursive
    $env:KCONFIG_REPORT_VERBOSITY='quiet'
    ```
 
-3. IDFのPython環境でローカルHTTPS証明書を生成する。
-   `cryptography`はIDFのPython依存に含まれる。秘密鍵は各環境で生成し、既存ファイルは上書きしない。
+3. ターゲットを設定しmenuconfigを開く。
 
    ```powershell
-   python tools/make_cert.py
    idf.py set-target esp32s3
    idf.py menuconfig
    ```
 
-4. `ESP webcam`でSSID・パスワード・カメラ対応fps・送信目標fps・Idle FPSを入力する。
+4. `ESP webcam`でSSID・パスワード・カメラ対応fps・送信目標fps・Idle FPS・
+   `Node signaling server base URL`・`STUN server URL`を入力する。
    認証情報はローカルの` sdkconfig `とビルド成果物に含まれるため、これらを共有しない。
    ソース・既定値・実行ログには認証情報を記載しない。
 5. ビルドしてUART経由で書き込む。COM番号は実際のポートへ置き換える。
@@ -224,8 +249,7 @@ git submodule update --init --recursive
    ```
 
 6. 給電・USBホスト配線を確認した上で、対象カメラをPCから外してESP側のホストポートへ接続する。
-   ログの`Open https://<IP>/`を同一LANのChrome/Edgeで開く。
-   ローカル生成の自己署名証明書なので、対象機器のIPであることを確認して例外を許可する。
+   PCで`viewer-server`を起動し、同一LANのChrome/Edgeで`http://<PCのIP>:8080/`を開く。
    「接続」を押すとJPEGを表示する。再接続は「切断」→「接続」。同時接続は1台で、新しいofferが前の接続を置き換える。
 7. 作業後はQ:以外へ移動して`subst Q: /D`で割り当てを解除できる。
 
@@ -285,19 +309,28 @@ PCのホットスポットが有効、2.4GHz、SSIDとパスワードがロー�
 接続・IP取得とHTTPS応答は現時点では未確認。認証情報そのものは本書へ記載しない。
 
 その後、ユーザーがIO0のGND接続を解除して通常起動し、対象MACのWi-Fi接続を確認した。
-取得IP `192.168.137.139`で`/`と`/receiver.js`がHTTP 200を返し、配信画面の内容も一致した。
+取得IP `192.168.137.139`で`/`と`/status`がHTTP 200を返し、診断画面の内容も一致した。
 このIPは今回のDHCP割り当てであり固定ではない。GPIO0をLowに保持したまま起動すると
 書き込みモードになるため、通常運用ではLowに保持しない。
-UVCカメラ受信・DataChannel接続・映像表示・実測fpsは引き続き未検証。
+
+2026-10-31の最終確認では、USB機器1台・UVC検出1件、`frames_received`と`valid_jpegs`が
+615枚で一致し、`transfer_errors:0`・`buffer_overflows:0`。`/rtc-status`は
+`peer_state:10`（DataChannel開通）、`channel_open:true`、`sent_frames:105`、
+`acked_frames:79`、`last_ack_rtt_ms:120`、`effective_fps:2`、`client_motion:3`。
+ブラウザでカラーHD映像を確認した。開通しなかった原因は、`peer_task`で`size = n;`が
+抜けてJPEGを送っていなかったことと、Nodeサーバーが`.local`展開時に
+`a=candidate:`接頭辞を落として`127.0.0.1`へ置換していたこと。両方修正済み。
+長時間のfps・遅延・再接続は未測定。
 
 Windowsでのカメラdescriptor確認結果は[カメラ調査メモ](../docs/camera-349c-3307.md)を参照。
 再確認は`python tools/probe_windows_camera.py`。USBハブ情報を読めるWindows端末で実行する。
 映像の撮影・取得、ドライバ変更、USBポートのリセットは行わない。
 
-ブラウザの受信処理はPC単体で検証できる。
+ブラウザの受信処理とシグナリング中継はPC単体で検証できる。
 
 ```powershell
-node --test tests/receiver.test.mjs
+Set-Location <リポジトリ>\viewer-server
+node --test tests/*.test.mjs
 ```
 
 実機で次を順に記録する。
@@ -317,8 +350,9 @@ node --test tests/receiver.test.mjs
 6. ESPの3.3V瞬時低下、レギュレータ温度、5V電流とカメラ突入電流を測定する。
 
 接続不能時はAPの端末分離・VLAN・ファイアウォール・同一LANを確認する。
-ESPのICE実装でブラウザmDNS候補が解決できない場合は、公式例に記載の
-WebRTC mDNS候補設定を検証用ブラウザで確認する。LAN外はTURN/STUN等の追加設計が必要。
+`viewer-server/last-offer.sdp`でESPへ渡した候補を確認し、`/log`でICE/DTLS/SCTPの
+失敗段階を切り分ける。`peer_state`が4から8へ即座に進む場合は、有効なホスト候補が
+ESPへ届いていない。LAN外はTURN/STUN等の追加設計が必要。
 
 ## 根拠資料（2026-10-31参照）
 

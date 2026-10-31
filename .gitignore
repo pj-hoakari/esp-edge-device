@@ -3,5 +3,7 @@ _autosave*
 production/
 *-backups
 esp_webcam/.tools/
+viewer-server/last-offer.sdp
+viewer-server/node_modules/
 .DS_Store
 Thumbs.db

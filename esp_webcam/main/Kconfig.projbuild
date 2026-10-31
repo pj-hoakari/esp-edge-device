@@ -58,6 +58,24 @@ config WEBCAM_DATACHANNEL_RETRANSMITS
         0 sends each JPEG chunk once. An incomplete frame is discarded by the
         browser and replaced by the next frame, which saves retransmission
         bandwidth on a lossy Wi-Fi link.
+config WEBCAM_SIGNALING_URL
+    string "Node signaling server base URL (empty disables WebRTC)"
+    default "http://192.168.137.1:8080"
+    help
+        Base URL of the viewer-server at the repository root. The ESP polls
+        this server for SDP offers and posts answers; the browser is served by
+        the same server. Use an address the ESP can reach, for example the PC
+        hotspot gateway. The ESP's own HTTP server keeps only camera debug
+        endpoints. Leave empty to run the MJPEG diagnostics without WebRTC.
+config WEBCAM_STUN_URL
+    string "STUN server URL (empty disables)"
+    default "stun:stun.l.google.com:19302"
+    help
+        STUN server used by the ESP ICE agent. The viewer server publishes the
+        browser's STUN setting from its own STUN_URL environment variable, so
+        keep both values aligned. STUN only discovers the server-reflexive
+        address; TURN relay and authentication are not configured. Leave empty
+        on a LAN without Internet access to use host candidates only.
 config WEBCAM_CAMERA_VID
     hex "UVC camera VID (0 matches any vendor)"
     range 0x0 0xffff

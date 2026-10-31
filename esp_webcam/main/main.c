@@ -11,25 +11,21 @@
 #include "freertos/semphr.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
-#include "esp_https_server.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
-#include "esp_netif.h"
 #include "esp_timer.h"
-#include "esp_wifi.h"
-#include "nvs_flash.h"
 #include "esp_peer_default.h"
 #include "camera.h"
 #include "webrtc.h"
-#include "lwip/sockets.h"
-#include "lwip/inet.h"
 
 /* All peer APIs are called by peer_task; callbacks execute in that task too. */
 static const char *TAG = "webcam";
 static esp_peer_handle_t peer;
 static QueueHandle_t commands;
-static SemaphoreHandle_t signal_lock;
-static char *answer;
-static uint32_t session;
+static SemaphoreHandle_t answer_lock;
+static char *pending_answer;
+static uint32_t pending_answer_id;
+static int64_t pending_answer_at;
 static uint32_t active_session;
 static uint16_t stream_id;
 static atomic_bool channel_open;
@@ -41,6 +37,8 @@ static int64_t ack_since;
 static atomic_int client_motion = -1;
 static atomic_int effective_fps = CONFIG_WEBCAM_TARGET_FPS;
 static int64_t motion_until, last_ack_us;
+static char stun_url[] = CONFIG_WEBCAM_STUN_URL;
+static esp_peer_ice_server_cfg_t ice_server = {.stun_url = stun_url};
 typedef struct { char *sdp; uint32_t id; } command_t;
 
 #define KEEPALIVE_US ((int64_t)CONFIG_WEBCAM_KEEPALIVE_MS * 1000)
@@ -79,16 +77,41 @@ static void stats_reset(void)
 
 bool webrtc_video_active(void) { return atomic_load(&channel_open); }
 
+int webrtc_status_json(char *out, size_t size)
+{
+    sender_stats_t s;
+    portENTER_CRITICAL(&stats_mux);
+    s = stats;
+    portEXIT_CRITICAL(&stats_mux);
+    return snprintf(out, size,
+        "{\"peer_state\":%d,\"channel_open\":%s,\"stream_id\":%u,"
+        "\"frame_id\":%"PRIu32",\"effective_fps\":%d,\"client_motion\":%d,"
+        "\"sent_frames\":%"PRIu32",\"sent_bytes\":%"PRIu64","
+        "\"send_errors\":%"PRIu32",\"dropped_frames\":%"PRIu32","
+        "\"skipped_identical\":%"PRIu32",\"stale_frames\":%"PRIu32","
+        "\"acked_frames\":%"PRIu32",\"no_ack\":%"PRIu32","
+        "\"last_ack_rtt_ms\":%"PRIu32",\"ack_pending\":%s}",
+        peer_state, atomic_load(&channel_open) ? "true" : "false", stream_id,
+        frame_id, atomic_load(&effective_fps), atomic_load(&client_motion),
+        s.sent_frames, s.sent_bytes, s.send_errors, s.dropped_frames,
+        s.skipped_identical, s.stale_frames, s.acked_frames, s.no_ack,
+        s.last_ack_rtt_ms, ack_pending ? "true" : "false");
+}
+
 static int on_msg(esp_peer_msg_t *msg, void *ctx)
 {
     if (msg->type == ESP_PEER_MSG_TYPE_SDP) {
         char *copy = strndup((char *)msg->data, msg->size);
         // Only publish an answer. Initial ICE gathering may report an offer.
+        // Hold the answer briefly in signaling_task so the last candidate
+        // update from gathering wins before it is posted to the Node server.
         if (!copy || strstr(copy, "a=setup:actpass")) { free(copy); return 0; }
-        xSemaphoreTake(signal_lock, portMAX_DELAY);
-        if (active_session == session) { free(answer); answer = copy; }
-        else free(copy);
-        xSemaphoreGive(signal_lock);
+        xSemaphoreTake(answer_lock, portMAX_DELAY);
+        free(pending_answer);
+        pending_answer = copy;
+        pending_answer_id = active_session;
+        pending_answer_at = esp_timer_get_time() + 300000;
+        xSemaphoreGive(answer_lock);
     }
     return 0;
 }
@@ -172,7 +195,10 @@ static int open_peer(void)
         .keep_role = true,
         .data_ch_cfg = {.cache_timeout = 250, .recv_cache_size = 16384, .send_cache_size = 131072},
     };
+    bool use_stun = CONFIG_WEBCAM_STUN_URL[0] != '\0';
     esp_peer_cfg_t cfg = {
+        .server_lists = use_stun ? &ice_server : NULL,
+        .server_num = use_stun ? 1 : 0,
         .role = ESP_PEER_ROLE_CONTROLLED,
         .enable_data_channel = true, .manual_ch_create = true, .no_auto_reconnect = true,
         .on_msg = on_msg, .on_state = on_state, .on_channel_open = on_open,
@@ -212,9 +238,10 @@ static void peer_task(void *arg)
             atomic_store(&effective_fps, CONFIG_WEBCAM_TARGET_FPS);
             motion_until = 0; last_ack_us = 0;
             stats_reset();
-            xSemaphoreTake(signal_lock, portMAX_DELAY);
-            if (active_session == session) { free(answer); answer = NULL; }
-            xSemaphoreGive(signal_lock);
+            xSemaphoreTake(answer_lock, portMAX_DELAY);
+            free(pending_answer);
+            pending_answer = NULL;
+            xSemaphoreGive(answer_lock);
             if (cmd.sdp && open_peer() == 0) {
                 int ret = esp_peer_new_connection(peer);
                 if (ret == 0) {
@@ -271,7 +298,7 @@ static void peer_task(void *arg)
                 next_frame = now + period_us;
             } else {
                 offset = 0; send_since = now; next_frame = now + period_us;
-                pending_size = n; pending_crc = got.crc32;
+                size = n; pending_size = n; pending_crc = got.crc32;
                 frame_id++;
             }
         }
@@ -318,161 +345,150 @@ static void peer_task(void *arg)
     }
 }
 
-extern const uint8_t html_start[] asm("_binary_index_html_start");
-extern const uint8_t js_start[] asm("_binary_receiver_js_start");
-extern const uint8_t cert_start[] asm("_binary_server_crt_start");
-extern const uint8_t cert_end[] asm("_binary_server_crt_end");
-extern const uint8_t key_start[] asm("_binary_server_key_start");
-extern const uint8_t key_end[] asm("_binary_server_key_end");
+#define SDP_MAX 32768
 
-static esp_err_t page(httpd_req_t *r)
+static void build_url(char *out, size_t size, const char *path)
 {
-    bool js = strcmp(r->uri, "/receiver.js") == 0;
-    httpd_resp_set_type(r, js ? "text/javascript" : "text/html; charset=utf-8");
-    httpd_resp_set_hdr(r, "Cache-Control", "no-store");
-    return httpd_resp_sendstr(r, (char *)(js ? js_start : html_start));
+    size_t len = strlen(CONFIG_WEBCAM_SIGNALING_URL);
+    while (len && CONFIG_WEBCAM_SIGNALING_URL[len - 1] == '/') len--;
+    snprintf(out, size, "%.*s%s", (int)len, CONFIG_WEBCAM_SIGNALING_URL, path);
 }
 
-static esp_err_t offer(httpd_req_t *r)
+// Small blocking HTTP request used only by signaling_task. The SDP bodies are
+// bounded so the task can return to polling quickly even on a dead server.
+static int http_request(const char *url, const char *body, char *out, size_t out_size,
+                        int *status)
 {
-    if (r->content_len < 1 || r->content_len > 16384)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "SDP size invalid");
-    char *sdp = malloc(r->content_len + 1);
-    if (!sdp) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "No memory");
-    int got = 0;
-    while (got < r->content_len) {
-        int n = httpd_req_recv(r, sdp + got, r->content_len - got);
-        if (n <= 0) { free(sdp); return ESP_FAIL; }
-        got += n;
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .timeout_ms = 5000,
+        .keep_alive_enable = false,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) return -1;
+    int body_len = body ? (int)strlen(body) : 0;
+    if (body) {
+        esp_http_client_set_method(client, HTTP_METHOD_POST);
+        esp_http_client_set_header(client, "Content-Type", "application/sdp");
     }
-    sdp[got] = 0;
-    // LAN-only signaling is direct from the browser. Expand obfuscated host
-    // candidates to that browser's observed IPv4 address, without changing
-    // browser privacy settings or needing multicast DNS through a hotspot.
-    struct sockaddr_in remote;
-    socklen_t remote_len = sizeof(remote);
-    if (getpeername(httpd_req_to_sockfd(r), (struct sockaddr *)&remote, &remote_len) == 0 &&
-        remote.sin_family == AF_INET) {
-        char ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &remote.sin_addr, ip, sizeof(ip));
-        char *expanded = malloc(32769);
-        size_t used = 0;
-        bool ok = expanded != NULL;
-        for (char *line = sdp; ok && *line;) {
-            char *end = strchr(line, '\n');
-            size_t len = end ? (size_t)(end + 1 - line) : strlen(line);
-            char *address = NULL, *address_end = NULL;
-            if (strncmp(line, "a=candidate:", 12) == 0) {
-                char *p = line + 12;
-                for (int field = 0; field < 4 && p < line + len; field++) {
-                    while (p < line + len && *p != ' ') p++;
-                    while (p < line + len && *p == ' ') p++;
-                }
-                char *q = p;
-                while (q < line + len && *q != ' ' && *q != '\r' && *q != '\n') q++;
-                char *host = strstr(line, " typ host");
-                if (host && host < line + len && q - p > 6 &&
-                    memcmp(q - 6, ".local", 6) == 0) {
-                    address = p; address_end = q;
+    esp_err_t err = esp_http_client_open(client, body_len);
+    if (err == ESP_OK && body && esp_http_client_write(client, body, body_len) != body_len)
+        err = ESP_FAIL;
+    if (err == ESP_OK && esp_http_client_fetch_headers(client) < 0)
+        err = ESP_FAIL;
+    int total = 0;
+    if (err == ESP_OK && out && out_size) {
+        while (total < (int)out_size - 1) {
+            int n = esp_http_client_read(client, out + total, (int)out_size - 1 - total);
+            if (n < 0) { err = ESP_FAIL; break; }
+            if (n == 0) break;
+            total += n;
+        }
+        out[total] = 0;
+    }
+    *status = esp_http_client_get_status_code(client);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return err == ESP_OK ? total : -1;
+}
+
+static int ret_delay(int status)
+{
+    return status == 0 ? 1000 : 250;
+}
+
+static void submit_offer(const char *sdp, uint32_t id)
+{
+    char *copy = strdup(sdp);
+    if (!copy) return;
+    command_t cmd = {.sdp = copy, .id = id};
+    if (xQueueSend(commands, &cmd, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "Offer queue full; dropping offer %"PRIu32, id);
+        free(copy);
+        return;
+    }
+    xSemaphoreTake(answer_lock, portMAX_DELAY);
+    free(pending_answer);
+    pending_answer = NULL;
+    xSemaphoreGive(answer_lock);
+    ESP_LOGI(TAG, "Signaling offer %"PRIu32" (%u bytes)", id, (unsigned)strlen(sdp));
+}
+
+static void signaling_task(void *arg)
+{
+    char offer_url[256], answer_url[256];
+    char *sdp = malloc(SDP_MAX);
+    char *reply = malloc(512);
+    assert(sdp && reply);
+    uint32_t last_offer_id = 0;
+    for (;;) {
+        int status = 0;
+        snprintf(offer_url, sizeof(offer_url), "/api/esp/offer?seen=%"PRIu32, last_offer_id);
+        char url[320];
+        build_url(url, sizeof(url), offer_url);
+        int got = http_request(url, NULL, sdp, SDP_MAX, &status);
+        if (got > 0 && status == 200) {
+            char *line = strchr(sdp, '\n');
+            if (line) {
+                *line = 0;
+                uint32_t id = (uint32_t)strtoul(sdp, NULL, 10);
+                if (id && id != last_offer_id) {
+                    submit_offer(line + 1, id);
+                    last_offer_id = id;
                 }
             }
-            size_t needed = address ? len - (address_end - address) + strlen(ip) : len;
-            if (used + needed > 32768) { ok = false; break; }
-            if (address) {
-                size_t prefix = address - line;
-                memcpy(expanded + used, line, prefix); used += prefix;
-                memcpy(expanded + used, ip, strlen(ip)); used += strlen(ip);
-                memcpy(expanded + used, address_end, len - (address_end - line));
-                used += len - (address_end - line);
-            } else { memcpy(expanded + used, line, len); used += len; }
-            line += len;
         }
-        if (ok) { expanded[used] = 0; free(sdp); sdp = expanded; }
-        else free(expanded);
-    }
-    xSemaphoreTake(signal_lock, portMAX_DELAY);
-    command_t cmd = {.sdp = sdp, .id = session + 1};
-    if (xQueueSend(commands, &cmd, 0) != pdTRUE) {
-        xSemaphoreGive(signal_lock);
-        free(sdp); httpd_resp_set_status(r, "503 Service Unavailable");
-        return httpd_resp_sendstr(r, "Busy");
-    }
-    session = cmd.id; free(answer); answer = NULL;
-    xSemaphoreGive(signal_lock);
-    char text[16]; snprintf(text, sizeof(text), "%"PRIu32, cmd.id);
-    return httpd_resp_sendstr(r, text);
-}
 
-static esp_err_t get_answer(httpd_req_t *r)
-{
-    char query[32], id[16];
-    if (httpd_req_get_url_query_str(r, query, sizeof(query)) != ESP_OK ||
-        httpd_query_key_value(query, "id", id, sizeof(id)) != ESP_OK)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing session");
-    xSemaphoreTake(signal_lock, portMAX_DELAY);
-    if (strtoul(id, NULL, 10) != session) {
-        xSemaphoreGive(signal_lock); httpd_resp_set_status(r, "409 Conflict");
-        return httpd_resp_sendstr(r, "Session replaced");
+        char *answer = NULL;
+        uint32_t answer_id = 0;
+        int64_t now = esp_timer_get_time();
+        xSemaphoreTake(answer_lock, portMAX_DELAY);
+        if (pending_answer && now >= pending_answer_at) {
+            answer = pending_answer;
+            answer_id = pending_answer_id;
+            pending_answer = NULL;
+        }
+        xSemaphoreGive(answer_lock);
+        if (answer) {
+            snprintf(answer_url, sizeof(answer_url), "/api/esp/answer?id=%"PRIu32, answer_id);
+            build_url(url, sizeof(url), answer_url);
+            int post_status = 0;
+            int ret = http_request(url, answer, reply, 512, &post_status);
+            if (ret < 0) {
+                // Restore only if no newer answer arrived while posting.
+                xSemaphoreTake(answer_lock, portMAX_DELAY);
+                if (!pending_answer) {
+                    pending_answer = answer;
+                    pending_answer_id = answer_id;
+                    pending_answer_at = esp_timer_get_time() + 500000;
+                    answer = NULL;
+                }
+                xSemaphoreGive(answer_lock);
+                ESP_LOGW(TAG, "Answer POST failed; will retry");
+            } else if (post_status == 200) {
+                ESP_LOGI(TAG, "Signaling answer %"PRIu32" sent", answer_id);
+            } else {
+                ESP_LOGW(TAG, "Answer %"PRIu32" rejected: HTTP %d", answer_id, post_status);
+            }
+            free(answer);
+        }
+        vTaskDelay(pdMS_TO_TICKS(ret_delay(status)));
     }
-    char *copy = answer ? strdup(answer) : NULL;
-    xSemaphoreGive(signal_lock);
-    httpd_resp_set_hdr(r, "Cache-Control", "no-store");
-    if (!copy) httpd_resp_set_status(r, "202 Accepted");
-    esp_err_t ret = httpd_resp_sendstr(r, copy ? copy : "");
-    free(copy); return ret;
-}
-
-static esp_err_t rtc_status(httpd_req_t *r)
-{
-    sender_stats_t s;
-    portENTER_CRITICAL(&stats_mux); s = stats; portEXIT_CRITICAL(&stats_mux);
-    char json[768];
-    int len = snprintf(json, sizeof(json),
-        "{\"peer_state\":%d,\"channel_open\":%s,\"target_fps\":%d,"
-        "\"effective_fps\":%d,\"idle_fps\":%d,\"client_motion\":%d,"
-        "\"sent_frames\":%"PRIu32",\"sent_kib\":%"PRIu64",\"send_errors\":%"PRIu32","
-        "\"dropped_frames\":%"PRIu32",\"skipped_identical\":%"PRIu32","
-        "\"stale_frames\":%"PRIu32",\"acked_frames\":%"PRIu32","
-        "\"last_ack_rtt_ms\":%"PRIu32",\"no_ack\":%"PRIu32"}",
-        peer_state, channel_open ? "true" : "false", CONFIG_WEBCAM_TARGET_FPS,
-        atomic_load(&effective_fps), CONFIG_WEBCAM_IDLE_FPS, atomic_load(&client_motion),
-        s.sent_frames, (s.sent_bytes + 1023) / 1024, s.send_errors,
-        s.dropped_frames, s.skipped_identical, s.stale_frames, s.acked_frames,
-        s.last_ack_rtt_ms, s.no_ack);
-    if (len < 0 || len >= sizeof(json))
-        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Status buffer too small");
-    httpd_resp_set_type(r, "application/json");
-    httpd_resp_set_hdr(r, "Cache-Control", "no-store");
-    return httpd_resp_send(r, json, len);
-}
-
-static void start_server(void)
-{
-    httpd_ssl_config_t cfg = HTTPD_SSL_CONFIG_DEFAULT();
-    cfg.httpd.stack_size = 10240;
-    cfg.httpd.ctrl_port = 32770;
-    cfg.httpd.max_open_sockets = 3;
-    cfg.servercert = cert_start; cfg.servercert_len = cert_end - cert_start;
-    cfg.prvtkey_pem = key_start; cfg.prvtkey_len = key_end - key_start;
-    httpd_handle_t server;
-    ESP_ERROR_CHECK(httpd_ssl_start(&server, &cfg));
-    const httpd_uri_t routes[] = {
-        {.uri = "/", .method = HTTP_GET, .handler = page},
-        {.uri = "/receiver.js", .method = HTTP_GET, .handler = page},
-        {.uri = "/offer", .method = HTTP_POST, .handler = offer},
-        {.uri = "/answer", .method = HTTP_GET, .handler = get_answer},
-        {.uri = "/rtc-status", .method = HTTP_GET, .handler = rtc_status},
-    };
-    for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); i++)
-        ESP_ERROR_CHECK(httpd_register_uri_handler(server, &routes[i]));
 }
 
 void webrtc_start(void)
 {
-    commands = xQueueCreate(1, sizeof(command_t));
-    signal_lock = xSemaphoreCreateMutex();
-    assert(commands && signal_lock);
+    commands = xQueueCreate(2, sizeof(command_t));
+    answer_lock = xSemaphoreCreateMutex();
+    assert(commands && answer_lock);
     esp_peer_set_dtls_cipher_pref(ESP_PEER_DTLS_CIPHER_AES_GCM);
+    if (stun_url[0]) ESP_LOGI(TAG, "ICE STUN server: %s", stun_url);
+    else ESP_LOGW(TAG, "ICE STUN server disabled; using host candidates only");
     assert(xTaskCreatePinnedToCore(peer_task, "webrtc", 16384, NULL, 6, NULL, 1) == pdPASS);
-    start_server();
+    if (CONFIG_WEBCAM_SIGNALING_URL[0]) {
+        ESP_LOGI(TAG, "Signaling server: %s", CONFIG_WEBCAM_SIGNALING_URL);
+        assert(xTaskCreatePinnedToCore(signaling_task, "signal", 8192, NULL, 5, NULL, 0) == pdPASS);
+    } else {
+        ESP_LOGW(TAG, "Signaling server disabled; WebRTC will not start");
+    }
 }

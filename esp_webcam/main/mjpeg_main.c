@@ -23,12 +23,16 @@ static const char *TAG = "mjpeg";
 extern const char page_start[] asm("_binary_mjpeg_html_start");
 static vprintf_like_t original_log;
 static portMUX_TYPE log_mux = portMUX_INITIALIZER_UNLOCKED;
+#define LOG_LINES 32
+#define LOG_LINE_SIZE 224
 static char usb_logs[8][192];
 static unsigned usb_log_count;
+static char rtc_logs[LOG_LINES][LOG_LINE_SIZE];
+static unsigned rtc_log_count;
 
 static int capture_usb_log(const char *format, va_list args)
 {
-    char line[192] = {0};
+    char line[LOG_LINE_SIZE] = {0};
     va_list copy;
     va_copy(copy, args);
     vsnprintf(line, sizeof(line), format, copy);
@@ -37,9 +41,17 @@ static int capture_usb_log(const char *format, va_list args)
     if (strstr(line, "ENUM:") || strstr(line, "HUB:") || strstr(line, "HCD DWC:") ||
         strstr(line, "uvc:") || strstr(line, "camera:") || strstr(line, "USBH:")) {
         portENTER_CRITICAL(&log_mux);
-        memcpy(usb_logs[usb_log_count % 8], line, sizeof(line));
-        usb_logs[usb_log_count % 8][sizeof(line) - 1] = 0;
+        memcpy(usb_logs[usb_log_count % 8], line, sizeof(usb_logs[0]));
+        usb_logs[usb_log_count % 8][sizeof(usb_logs[0]) - 1] = 0;
         usb_log_count++;
+        portEXIT_CRITICAL(&log_mux);
+    }
+    if (strstr(line, "DTLS") || strstr(line, "esp_peer") || strstr(line, "SCTP") ||
+        strstr(line, "ICE") || strstr(line, "webcam:")) {
+        portENTER_CRITICAL(&log_mux);
+        memcpy(rtc_logs[rtc_log_count % LOG_LINES], line, LOG_LINE_SIZE);
+        rtc_logs[rtc_log_count % LOG_LINES][LOG_LINE_SIZE - 1] = 0;
+        rtc_log_count++;
         portEXIT_CRITICAL(&log_mux);
     }
     return original_log ? original_log(format, args) : vprintf(format, args);
@@ -58,6 +70,26 @@ static esp_err_t usb_log_page(httpd_req_t *req)
     unsigned start = count > 8 ? count - 8 : 0;
     for (unsigned i = start; i < count; i++) {
         esp_err_t err = httpd_resp_sendstr_chunk(req, lines[i % 8]);
+        if (err != ESP_OK) return err;
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
+static esp_err_t rtc_log_page(httpd_req_t *req)
+{
+    char line[LOG_LINE_SIZE];
+    unsigned count;
+    portENTER_CRITICAL(&log_mux);
+    count = rtc_log_count;
+    portEXIT_CRITICAL(&log_mux);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    unsigned start = count > LOG_LINES ? count - LOG_LINES : 0;
+    for (unsigned i = start; i < count; i++) {
+        portENTER_CRITICAL(&log_mux);
+        memcpy(line, rtc_logs[i % LOG_LINES], sizeof(line));
+        portEXIT_CRITICAL(&log_mux);
+        esp_err_t err = httpd_resp_sendstr_chunk(req, line);
         if (err != ESP_OK) return err;
     }
     return httpd_resp_send_chunk(req, NULL, 0);
@@ -122,6 +154,17 @@ static esp_err_t diagnostics(httpd_req_t *req)
     return httpd_resp_send(req, json, len);
 }
 
+static esp_err_t rtc_status(httpd_req_t *req)
+{
+    char json[640];
+    int len = webrtc_status_json(json, sizeof(json));
+    if (len < 0 || len >= sizeof(json))
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "RTC status buffer too small");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, json, len);
+}
+
 static esp_err_t stream(httpd_req_t *req)
 {
     uint8_t *jpeg = heap_caps_malloc(JPEG_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -169,9 +212,13 @@ static void start_servers(void)
     const httpd_uri_t home = {.uri = "/", .method = HTTP_GET, .handler = page};
     const httpd_uri_t status = {.uri = "/status", .method = HTTP_GET, .handler = diagnostics};
     const httpd_uri_t log_uri = {.uri = "/usb-log", .method = HTTP_GET, .handler = usb_log_page};
+    const httpd_uri_t rtc_uri = {.uri = "/rtc-status", .method = HTTP_GET, .handler = rtc_status};
+    const httpd_uri_t rtc_log_uri = {.uri = "/log", .method = HTTP_GET, .handler = rtc_log_page};
     ESP_ERROR_CHECK(httpd_register_uri_handler(control, &home));
     ESP_ERROR_CHECK(httpd_register_uri_handler(control, &status));
     ESP_ERROR_CHECK(httpd_register_uri_handler(control, &log_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(control, &rtc_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(control, &rtc_log_uri));
     // A separate server keeps /status responsive during a long-running stream.
     cfg.server_port = 81;
     cfg.ctrl_port++;
