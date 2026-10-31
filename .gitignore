@@ -1,0 +1,7 @@
+_autosave*
+~*.lck
+production/
+*-backups
+esp_webcam/.tools/
+.DS_Store
+Thumbs.db

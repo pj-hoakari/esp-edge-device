@@ -1,0 +1,25 @@
+dependencies:
+  espressif/esp_libsrtp:
+    component_hash: 131560184c73ec09f77d8904a2db709307803f0f9f111898921b6966776eac15
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.0
+  idf:
+    source:
+      type: idf
+    version: 6.1.0
+  usb:
+    dependencies: []
+    source:
+      path: vendor/esp-usb/host/usb
+      type: local
+    version: 1.6.0
+direct_dependencies:
+- espressif/esp_libsrtp
+- idf
+- usb
+manifest_hash: a5dc77122765903c18b819051f6f485f2228df5d53cac60803c940ab097ed99b
+target: esp32s3
+version: 3.0.0

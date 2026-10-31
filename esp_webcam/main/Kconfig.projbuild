@@ -1,0 +1,69 @@
+menu "ESP webcam"
+config WEBCAM_WIFI_SSID
+    string "Wi-Fi SSID (local sdkconfig only)"
+    default ""
+config WEBCAM_WIFI_PASSWORD
+    string "Wi-Fi password (local sdkconfig only)"
+    default ""
+config WEBCAM_CAMERA_FPS
+    int "UVC capture FPS (10 or 15 for 1280x720)"
+    range 1 30
+    default 10
+    help
+        The capture resolution is fixed at 1280x720 (HD) because HD is a
+        product requirement. The target camera advertises 10 and 15 fps and
+        the UVC driver requires an exact match. Capture may run faster than
+        the send target so the sender always has a fresh frame.
+config WEBCAM_TARGET_FPS
+    int "Wi-Fi/WebRTC/MJPEG send target FPS"
+    range 1 30
+    default 6
+    help
+        Hard ceiling for the number of frames sent per second over Wi-Fi.
+        Capture may run faster so the sender always has a fresh frame. Lower
+        values save bandwidth; 6 keeps the video usable at 1280x720.
+config WEBCAM_IDLE_FPS
+    int "Send FPS when the client reports a static scene"
+    range 1 30
+    default 2
+    help
+        The browser computes a motion score from decoded JPEGs and returns it
+        with ACK. The ESP drops to this rate after the motion hold expires and
+        returns to WEBCAM_TARGET_FPS when motion is detected. Set this equal to
+        WEBCAM_TARGET_FPS to disable adaptive rate control.
+config WEBCAM_MOTION_THRESHOLD
+    int "Client motion score (0-255) that restores the target FPS"
+    range 1 255
+    default 6
+    help
+        Mean absolute RGB difference on a 64x36 client-side preview. Raise it
+        if camera noise keeps the stream at the target rate.
+config WEBCAM_MOTION_HOLD_MS
+    int "Keep target FPS this long after motion (ms)"
+    range 0 10000
+    default 2000
+config WEBCAM_KEEPALIVE_MS
+    int "Resend an unchanged frame after this interval (0 = always send)"
+    range 0 60000
+    default 1000
+    help
+        Identical JPEGs (same CRC32) are not retransmitted. A keepalive copy
+        is still sent after this interval so a viewer wakes up after loss.
+        0 disables duplicate suppression and sends every paced frame.
+config WEBCAM_DATACHANNEL_RETRANSMITS
+    int "DataChannel max retransmits per message (0 = unreliable)"
+    range 0 3
+    default 0
+    help
+        0 sends each JPEG chunk once. An incomplete frame is discarded by the
+        browser and replaced by the next frame, which saves retransmission
+        bandwidth on a lossy Wi-Fi link.
+config WEBCAM_CAMERA_VID
+    hex "UVC camera VID (0 matches any vendor)"
+    range 0x0 0xffff
+    default 0x349c
+config WEBCAM_CAMERA_PID
+    hex "UVC camera PID (0 matches any product)"
+    range 0x0 0xffff
+    default 0x3307
+endmenu

@@ -1,0 +1,6 @@
+[submodule "esp_webcam/vendor/esp-usb"]
+	path = esp_webcam/vendor/esp-usb
+	url = https://github.com/espressif/esp-usb.git
+[submodule "esp_webcam/vendor/esp-webrtc-solution"]
+	path = esp_webcam/vendor/esp-webrtc-solution
+	url = https://github.com/espressif/esp-webrtc-solution.git

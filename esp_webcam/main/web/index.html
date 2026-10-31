@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>ESP32-S3 UVC webcam</title>
+<style>
+body{font:16px system-ui;background:#101820;color:#e5eef4;max-width:1000px;margin:32px auto;padding:0 20px}
+canvas{display:block;width:100%;height:auto;background:#05090c;border-radius:12px;margin-top:20px}
+button{padding:10px 24px;margin-right:12px;cursor:pointer}output{display:block;margin-top:16px;white-space:pre-wrap}
+</style>
+<h1>ESP32-S3 UVC webcam</h1><p>カラーJPEG / 目標6fps以上 · WebRTC DataChannel + クライアント側の動き検出</p>
+<button id="connect">接続</button><button id="disconnect">切断</button>
+<output id="status">未接続。同じLANのカメラに接続してください。</output>
+<canvas id="video" width="1280" height="720"></canvas>
+<script type="module" src="/receiver.js"></script></html>
