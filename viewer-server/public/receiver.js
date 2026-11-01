@@ -21,9 +21,10 @@ export async function fetchIceConfig(signal) {
   return { iceServers: [{ urls: [DEFAULT_STUN_URL] }], iceTransportPolicy: 'all' };
 }
 
-// One bounded frame in memory. Unordered delivery and duplicate chunks are supported.
+// Allow interleaved chunks from three consecutive frames. With unordered SCTP,
+// the first chunk of N+1 can precede the final chunk of N without any loss.
 export class JpegAssembler {
-  constructor() { this.frame = null; this.last = null; }
+  constructor() { this.frames = new Map(); this.newest = null; this.last = null; }
   push(buffer, now = performance.now()) {
     if (!(buffer instanceof ArrayBuffer) || buffer.byteLength <= 20 || buffer.byteLength > CHUNK + 20) return null;
     const v = new DataView(buffer);
@@ -33,21 +34,31 @@ export class JpegAssembler {
     if (total < 4 || total > MAX_FRAME || offset >= total || offset % CHUNK !== 0 ||
         n !== Math.min(CHUNK, total - offset)) return null;
     if (this.last !== null && ((id - this.last) | 0) <= 0) return null;
-    if (this.frame && now - this.frame.start > 1000) this.frame = null;
-    if (this.frame && this.frame.id !== id && ((id - this.frame.id) | 0) <= 0) return null;
-    if (!this.frame || this.frame.id !== id) {
-      this.frame = { id, total, start: now, bytes: new Uint8Array(total),
-        seen: new Set(), count: Math.ceil(total / CHUNK) };
+    for (const [key, frame] of this.frames) {
+      if (now - frame.start > 1000) this.frames.delete(key);
     }
-    const f = this.frame;
+    if (this.newest === null || ((id - this.newest) | 0) > 0) this.newest = id;
+    if (((this.newest - id) | 0) > 2) return null;
+    for (const key of this.frames.keys()) {
+      if (((this.newest - key) | 0) > 2) this.frames.delete(key);
+    }
+    if (!this.frames.has(id)) {
+      this.frames.set(id, { id, total, start: now, bytes: new Uint8Array(total),
+        seen: new Set(), count: Math.ceil(total / CHUNK) });
+    }
+    const f = this.frames.get(id);
     if (f.total !== total) return null;
     if (!f.seen.has(offset)) {
       f.bytes.set(new Uint8Array(buffer, 20), offset); f.seen.add(offset);
     }
     if (f.seen.size !== f.count) return null;
-    this.frame = null; this.last = id;
+    this.frames.delete(id);
     const b = f.bytes;
     if (b[0] !== 255 || b[1] !== 216 || b[total - 2] !== 255 || b[total - 1] !== 217) return null;
+    this.last = id;
+    for (const key of this.frames.keys()) {
+      if (((id - key) | 0) >= 0) this.frames.delete(key);
+    }
     return { id, bytes: b, assemblyMs: now - f.start };
   }
 }
@@ -86,45 +97,54 @@ if (typeof document !== 'undefined') {
 
     const assembler = new JpegAssembler();
     let shown = 0, bytes = 0, start = performance.now(), decoding = false;
-    const motionCanvas = document.createElement('canvas');
-    motionCanvas.width = 64; motionCanvas.height = 36;
-    const motionCtx = motionCanvas.getContext('2d', { willReadFrequently: true });
-    let prevMotion = null;
-    function setupChannel(incoming) {
-    channel = incoming; dc = incoming; channel.binaryType = 'arraybuffer';
-    channel.onopen = () => {
-      prevMotion = null;
-      if (run === generation) { start = performance.now(); status.textContent = '接続済み・JPEG待機中'; }
-    };
-    channel.onmessage = async event => {
-      if (run !== generation) return;
-      const frame = assembler.push(event.data);
-      if (!frame) return;
-      // A dropped frame is still acknowledged so the ESP can measure liveness;
-      // without a motion score the ESP keeps its previous adaptive rate.
-      if (decoding) { channel.send(`ACK:${frame.id}`); return; }
+    let pendingFrame = null, lastStatus = 0;
+    let sampleStart = start, sampleShown = 0, recentFps = 0;
+    async function display(frame) {
       decoding = true;
-      let frameMotion = -1;
       try {
         const bitmap = await createImageBitmap(new Blob([frame.bytes], { type: 'image/jpeg' }));
         try {
           if (run !== generation) return;
-          motionCtx.drawImage(bitmap, 0, 0, motionCanvas.width, motionCanvas.height);
-          const pixels = motionCtx.getImageData(0, 0, motionCanvas.width, motionCanvas.height).data;
-          frameMotion = motionScore(prevMotion, pixels, motionCanvas.width, motionCanvas.height);
-          prevMotion = pixels;
-          ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height); shown++; bytes += frame.bytes.length;
-          const seconds = (performance.now() - start) / 1000;
-          status.textContent = `${bitmap.width}×${bitmap.height} カラーJPEG | 平均 ${(shown / seconds).toFixed(2)} fps | ${(bytes * 8 / seconds / 1e6).toFixed(2)} Mbit/s\n` +
-            `${Math.round(frame.bytes.length / 1024)} KiB/枚 | 分割受信 ${Math.round(frame.assemblyMs)} ms | 動き ${frameMotion}/255 | ${shown}枚表示`;
+          ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+          shown++; bytes += frame.bytes.length;
+          // Only acknowledge frames actually drawn. The ESP's display_fps
+          // must not count frames discarded while the decoder was busy.
+          if (channel.readyState === 'open') channel.send(`ACK:${frame.id}`);
+          const now = performance.now();
+          if (now - sampleStart >= 1000) {
+            recentFps = (shown - sampleShown) * 1000 / (now - sampleStart);
+            sampleStart = now; sampleShown = shown;
+          }
+          if (now - lastStatus >= 250) {
+            const seconds = (now - start) / 1000;
+            status.textContent = `${bitmap.width}×${bitmap.height} カラーJPEG | 直近 ${recentFps.toFixed(2)} fps | 平均 ${(shown / seconds).toFixed(2)} fps | ${(bytes * 8 / seconds / 1e6).toFixed(2)} Mbit/s\n` +
+              `${Math.round(frame.bytes.length / 1024)} KiB/枚 | 分割受信 ${Math.round(frame.assemblyMs)} ms | ${shown}枚表示`;
+            lastStatus = now;
+          }
         } finally { bitmap.close(); }
       } catch (e) { if (run === generation) status.textContent = `JPEG表示失敗: ${e.message}`; }
       finally {
         decoding = false;
-        if (channel.readyState === 'open') {
-          channel.send(frameMotion >= 0 ? `ACK:${frame.id}:${frameMotion}` : `ACK:${frame.id}`);
-        }
+        const next = pendingFrame; pendingFrame = null;
+        if (next && run === generation) void display(next);
       }
+    }
+    function setupChannel(incoming) {
+    channel = incoming; dc = incoming; channel.binaryType = 'arraybuffer';
+    channel.onopen = () => {
+      if (run === generation) {
+        start = sampleStart = performance.now(); sampleShown = shown;
+        status.textContent = '接続済み・JPEG待機中';
+      }
+    };
+    channel.onmessage = event => {
+      if (run !== generation) return;
+      const frame = assembler.push(event.data);
+      if (!frame) return;
+      // Keep one latest frame during asynchronous decode; start it immediately
+      // on completion instead of waiting for another camera period.
+      if (decoding) pendingFrame = frame;
+      else void display(frame);
     };
     }
     connection.ondatachannel = event => { if(event.channel.label === 'jpeg') setupChannel(event.channel); };

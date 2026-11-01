@@ -33,8 +33,8 @@ JPEGをWebRTC DataChannelで送る方式に変更した。一般的な映像ト�
 `esp_webcam/` にESP-IDF v6.1のUVC MJPEG受信・DataChannel送信ファームウェア、
 ブラウザ受信画面とシグナリングサーバーはルートの`viewer-server/`へ分離し、
 ESPはビューアーを配信しない。ビルド設定・実機検証手順は`esp_webcam/README.md`にある。
-対象カメラに合わせ既定値は1280×720・10fps受信・送信目標6fps（`Send target FPS`で変更）。
-静止時は`Idle FPS`（既定2）へ自動で下げ、ブラウザの動き検出で6fpsへ復帰する。
+対象カメラに合わせ既定値は1280×720・10fps受信・送信目標10fps（`Send target FPS`で変更）。
+2026-11-01の依頼により静止時も6fps以上を必須とし、Idle FPS・同一画像抑制を撤去した。
 解像度はHD 1280×720固定で、Kconfigにも解像度を落とす項目は持たない。
 USB受信は広告fpsの帯域を消費する。
 ESP-IDF v6.1 / ESP32-S3向けビルド・リンク成功、受信処理とシグナリング中継のテスト7件成功。
@@ -55,18 +55,25 @@ J1 VBUSはユーザー実測4.97V。10.137秒のカウンタ測定ではUSB受�
 最大3バイトしか許さず16バイト境界の0〜15バイトのうち4/16だけ通ったためと推定した。
 長時間性能は未確認。設計ソース側はGitリポジトリを初期化済みで、`esp_webcam/vendor/`の
 esp-usbとesp-webrtc-solutionはsubmoduleとしてコミットを固定している。
-最新ソースは帯域最適化版。JPEG構造検査とEOI後の整列データ無制限除去、送信6fpsペーシング、
-クライアントの64×36動きスコアによる静止時2fps/動き時6fpsの自動切替、
-CRC32同一フレーム抑制、古いフレーム破棄、ACK非ゲート化、DataChannel再送0（Kconfig 0〜3）、
-ESP側生成の映像DataChannel、AES-GCM優先、CPU1配置、独立フレーム購読、ソケット上限20を実装した。
-解像度はHD 1280×720固定で、クライアントは受信JPEGをそのままcanvasへ描画する。
-HTTP診断・MJPEGも6fpsへ間引き、WebRTCも起動する。WebRTC接続中はMJPEG送信を休止する。
-`/status`は破棄理由別カウンタ・送信fps・Idle FPS・動きしきい値、
-`/rtc-status`は重複排除・stale破棄・ACK統計・`effective_fps`・`client_motion`を返す。
+最新ソースは6fps以上の常時維持を目標にした送信高速化版。JPEG構造検査とEOI後の
+整列データ除去、位相を維持する10fpsペーシング、最大4断片/4msのバースト送信、
+送信満杯時のパケット再利用、CRC32計算撤去、ACK非ゲート化を実装した。
+DataChannel再送0（Kconfig 0〜3）、ESP側生成チャンネル、AES-GCM優先、CPU1配置、
+独立フレーム購読、ソケット上限20を維持する。解像度はHD 1280×720固定。
+ブラウザは3フレーム分の断片順序入れ替えに対応し、デコード待ちは最新1枚だけ保持する。
+動き検出の画像読み戻しを撤去し、実際にcanvasへ描いたフレームだけACKする。
+HTTP MJPEGも目標10fpsで、WebRTC接続中はMJPEG送信を休止する。
+`/status`は破棄理由別カウンタと目標fps、`/rtc-status`は送信・描画ACKの直近約5秒fps、
+送信処理時間・WOULD_BLOCK件数を返す。`effective_fps`は設定値であり実測fpsではない。
+UDP送信の既定20ms再試行待機を`main/udp_fast.c`のweakフック置換で1ms×最大2回へ短縮した。
+送信失敗の-200規約は維持し、vendor/submodule自体は変更しない。
+速度優先コンパイル、lwIP IRAM配置、TCPIP mailbox 64、UDP mailbox 32、
+Wi-Fi TX buffer 48、TX BA window 12を` sdkconfig.defaults `とローカル設定へ反映した。
+詳細・メモリ負担・再測定手順は`docs/webrtc-performance-20261101.md`を参照する。
 `/log`は`DTLS`・`esp_peer`・`SCTP`・`ICE`・`webcam:`の直近32行を返し、
 Wi-Fi経由でハンドシェイク失敗を切り分けられる。
 JPEG解析の同一CコードをMSVCでPC実行するテスト（末尾0〜16バイト・破棄理由を含む）と
-受信側テスト5件、シグナリング中継・候補展開テスト4件、ESP-IDFビルド・リンクは成功
+2026-10-31時点の受信側テスト5件、シグナリング中継・候補展開テスト4件、ESP-IDFビルド・リンクは成功
 （app 1,188,272 bytes、0x1221b0）。
 2026-10-31にDataChannel経由のカラーHD映像を実機で確認した。`/rtc-status`は
 `peer_state:10`、`channel_open:true`、`sent_frames:105`、`acked_frames:79`、
@@ -74,7 +81,10 @@ JPEG解析の同一CコードをMSVCでPC実行するテスト（末尾0〜16バ
 開通しなかった原因は2つ。`peer_task`のフレーム開始分岐で`size = n;`が抜けてJPEGを
 一度も送っていなかったこと、Nodeサーバーの候補展開が`a=candidate:`を落とし
 `.local`を`127.0.0.1`へ置換していたこと。両方修正済み。
-改善版の長時間性能、静止時2fpsの体感、6fps上限の余裕は未測定。
+2026-11-01版はユーザーの手元に実機がなく、実機書き込み・実測6fps以上の維持・長時間性能は未検証。
+同版はESP-IDF v6.1 / ESP32-S3でビルド・リンク成功（app 1,161,584 bytes、0x11b970、
+アプリ領域24%空き）。最終ELFで高速UDPフックの強いシンボルへの置換を確認済み。
+受信・描画・中継の13テストとC送信周期／UDPバックプレッシャーのテストが成功した。
 `esp_webcam/vendor/` の2リポジトリはsubmodule、`.tools/esp-idf` はGit除外のローカルSDK取得である。
 作業開始時に実際の構成を確認し、構成変更に合わせてこの文書を更新する。
 

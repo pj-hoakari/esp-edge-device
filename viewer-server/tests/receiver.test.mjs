@@ -22,8 +22,35 @@ test('loss, expiry and a newer frame do not mix data', () => {
   a.push(packet(7,b,0),0);
   assert.equal(a.push(packet(7,b,CHUNK),1100),null);
   a.push(packet(8,b,CHUNK),1101);
-  assert.equal(a.push(packet(7,b,0),1102),null);
+  // The tail received after expiry starts a new assembly. A delayed head may
+  // finish it even after frame 8 starts; payloads must still remain separate.
+  assert.equal(a.push(packet(7,b,0),1102)?.id,7);
   assert.deepEqual(a.push(packet(8,b,0),1103).bytes,b);
+});
+test('next frame arrival does not discard a nearly complete older frame', () => {
+  const a = new JpegAssembler(), b = jpeg(CHUNK + 10);
+  a.push(packet(1,b,0),0);
+  a.push(packet(2,b,0),1);
+  assert.deepEqual(a.push(packet(1,b,CHUNK),2).bytes,b);
+  assert.deepEqual(a.push(packet(2,b,CHUNK),3).bytes,b);
+});
+test('reassembly stays bounded and completed newer frames retire older ones', () => {
+  const a = new JpegAssembler(), b = jpeg(MAX_FRAME);
+  for (let id = 1; id <= 50; id++) {
+    a.push(packet(id,b,0),id);
+    assert.ok(a.frames.size <= 3);
+  }
+  assert.equal(a.push(packet(47,b,CHUNK),51),null);
+  for (let offset = CHUNK; offset < b.length; offset += CHUNK) a.push(packet(50,b,offset),52);
+  assert.equal(a.frames.size,0);
+  assert.equal(a.push(packet(49,b,CHUNK),53),null);
+});
+test('interleaved reassembly works across uint32 wrap', () => {
+  const a = new JpegAssembler(), b = jpeg(CHUNK + 1);
+  a.push(packet(0xffffffff,b,0),0);
+  a.push(packet(0,b,0),1);
+  assert.ok(a.push(packet(0xffffffff,b,CHUNK),2));
+  assert.ok(a.push(packet(0,b,CHUNK),3));
 });
 test('reject malformed sizes, alignment, magic and broken JPEG', () => {
   const a = new JpegAssembler(), b = jpeg(32);

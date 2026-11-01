@@ -17,6 +17,7 @@
 #include "esp_peer_default.h"
 #include "camera.h"
 #include "webrtc.h"
+#include "sender_policy.h"
 
 /* All peer APIs are called by peer_task; callbacks execute in that task too. */
 static const char *TAG = "webcam";
@@ -36,18 +37,17 @@ static bool ack_pending;
 static int64_t ack_since;
 static atomic_int client_motion = -1;
 static atomic_int effective_fps = CONFIG_WEBCAM_TARGET_FPS;
-static int64_t motion_until, last_ack_us;
 static char stun_url[] = CONFIG_WEBCAM_STUN_URL;
 static esp_peer_ice_server_cfg_t ice_server = {.stun_url = stun_url};
 typedef struct { char *sdp; uint32_t id; } command_t;
-
-#define KEEPALIVE_US ((int64_t)CONFIG_WEBCAM_KEEPALIVE_MS * 1000)
-#define MOTION_HOLD_US ((int64_t)CONFIG_WEBCAM_MOTION_HOLD_MS * 1000)
 
 typedef struct {
     uint32_t sent_frames, send_errors, dropped_frames;
     uint32_t skipped_identical, stale_frames, acked_frames, no_ack;
     uint32_t last_ack_rtt_ms;
+    uint32_t would_block, max_send_ms;
+    uint32_t send_fps_milli, display_fps_milli;
+    uint64_t send_time_us;
     uint64_t sent_bytes;
 } sender_stats_t;
 static portMUX_TYPE stats_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -60,11 +60,13 @@ static void stats_bump(uint32_t *field)
     portEXIT_CRITICAL(&stats_mux);
 }
 
-static void stats_frame_sent(size_t bytes)
+static void stats_frame_sent(size_t bytes, int64_t elapsed)
 {
     portENTER_CRITICAL(&stats_mux);
     stats.sent_frames++;
     stats.sent_bytes += bytes;
+    stats.send_time_us += elapsed;
+    if (elapsed / 1000 > stats.max_send_ms) stats.max_send_ms = elapsed / 1000;
     portEXIT_CRITICAL(&stats_mux);
 }
 
@@ -90,12 +92,17 @@ int webrtc_status_json(char *out, size_t size)
         "\"send_errors\":%"PRIu32",\"dropped_frames\":%"PRIu32","
         "\"skipped_identical\":%"PRIu32",\"stale_frames\":%"PRIu32","
         "\"acked_frames\":%"PRIu32",\"no_ack\":%"PRIu32","
-        "\"last_ack_rtt_ms\":%"PRIu32",\"ack_pending\":%s}",
+        "\"last_ack_rtt_ms\":%"PRIu32",\"ack_pending\":%s,"
+        "\"would_block\":%"PRIu32",\"max_send_ms\":%"PRIu32","
+        "\"mean_send_ms\":%"PRIu64",\"send_fps\":%.3f,\"display_fps\":%.3f}",
         peer_state, atomic_load(&channel_open) ? "true" : "false", stream_id,
         frame_id, atomic_load(&effective_fps), atomic_load(&client_motion),
         s.sent_frames, s.sent_bytes, s.send_errors, s.dropped_frames,
         s.skipped_identical, s.stale_frames, s.acked_frames, s.no_ack,
-        s.last_ack_rtt_ms, ack_pending ? "true" : "false");
+        s.last_ack_rtt_ms, ack_pending ? "true" : "false",
+        s.would_block, s.max_send_ms,
+        s.sent_frames ? s.send_time_us / s.sent_frames / 1000 : 0,
+        s.send_fps_milli / 1000.0, s.display_fps_milli / 1000.0);
 }
 
 static int on_msg(esp_peer_msg_t *msg, void *ctx)
@@ -173,10 +180,8 @@ static int on_data(esp_peer_data_frame_t *f, void *ctx)
     if ((int32_t)(ack - last_ack_id) <= 0 || (int32_t)(ack - frame_id) > 0) return 0;
     last_ack_id = ack;
     int64_t now = esp_timer_get_time();
-    last_ack_us = now;
     if (motion >= 0) {
         atomic_store(&client_motion, motion);
-        if (motion >= CONFIG_WEBCAM_MOTION_THRESHOLD) motion_until = now + MOTION_HOLD_US;
     }
     portENTER_CRITICAL(&stats_mux);
     stats.acked_frames++;
@@ -191,7 +196,7 @@ static int on_data(esp_peer_data_frame_t *f, void *ctx)
 static int open_peer(void)
 {
     esp_peer_default_cfg_t extra = {
-        .agent_recv_timeout = 2,
+        .agent_recv_timeout = 1,
         .keep_role = true,
         .data_ch_cfg = {.cache_timeout = 250, .recv_cache_size = 16384, .send_cache_size = 131072},
     };
@@ -216,15 +221,12 @@ static void put32(uint8_t *p, uint32_t v)
 static void peer_task(void *arg)
 {
     uint8_t *frame = heap_caps_malloc(JPEG_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    uint8_t *packet = malloc(JPEG_CHUNK + 20);
+    uint8_t *packet = heap_caps_malloc(JPEG_CHUNK + 20, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     assert(frame && packet);
-    size_t size = 0, offset = 0, pending_size = 0;
-    uint32_t pending_crc = 0, last_crc = 0;
-    size_t last_size = 0;
-    bool have_last = false;
+    size_t size = 0, offset = 0, packet_size = 0;
     camera_frame_info_t info = {0};
-    int64_t next_frame = 0, send_since = 0, last_sent_at = 0, last_log = 0;
-    int last_fps = CONFIG_WEBCAM_TARGET_FPS;
+    int64_t next_frame = 0, send_since = 0, last_log = 0;
+    uint32_t sampled_sent = 0, sampled_acked = 0;
     ESP_ERROR_CHECK(esp_peer_pre_generate_cert());
     for (;;) {
         command_t cmd;
@@ -232,12 +234,12 @@ static void peer_task(void *arg)
             if (peer) { esp_peer_close(peer); peer = NULL; }
             active_session = cmd.id;
             channel_open = false; jpeg_channel_created = false; ack_pending = false;
-            size = 0; offset = 0; have_last = false; info.sequence = 0;
+            size = 0; offset = 0; packet_size = 0; info.sequence = 0;
             next_frame = 0; last_ack_id = 0;
             atomic_store(&client_motion, -1);
             atomic_store(&effective_fps, CONFIG_WEBCAM_TARGET_FPS);
-            motion_until = 0; last_ack_us = 0;
             stats_reset();
+            sampled_sent = 0; sampled_acked = 0; last_log = esp_timer_get_time();
             xSemaphoreTake(answer_lock, portMAX_DELAY);
             free(pending_answer);
             pending_answer = NULL;
@@ -262,17 +264,10 @@ static void peer_task(void *arg)
         }
         int cm = atomic_load(&client_motion);
         int fps = CONFIG_WEBCAM_TARGET_FPS;
-        // The browser reports how much the decoded picture changed. Drop to
-        // idle FPS only while that report is fresh and the motion hold expired.
-        // An old client sends no score and keeps the original target rate.
-        if (cm >= 0 && last_ack_us && now - last_ack_us < 3000000 && now >= motion_until)
-            fps = CONFIG_WEBCAM_IDLE_FPS;
-        // Motion just returned: do not wait out the idle slot.
-        if (fps > last_fps && !size) next_frame = now;
-        last_fps = fps;
+        if (fps < SENDER_MIN_FPS) fps = SENDER_MIN_FPS;
         atomic_store(&effective_fps, fps);
         const int64_t period_us = 1000000 / fps;
-        const int64_t budget_us = period_us * 3 / 2;
+        const int64_t budget_us = SENDER_FRAME_BUDGET_US;
         if (!channel_open) { size = 0; next_frame = 0; }
         // Read at most once per target period. The ACK is a freshness hint,
         // not a transmit lock: waiting for it used to cap the video below the
@@ -283,22 +278,15 @@ static void peer_task(void *arg)
             size_t n = camera_read_frame(frame, &got);
             info = got;
             bool stale = n && got.captured_us && now - got.captured_us > budget_us;
-            bool same = n && have_last && got.crc32 == last_crc && got.size == last_size &&
-                (CONFIG_WEBCAM_KEEPALIVE_MS == 0 || now - last_sent_at < KEEPALIVE_US);
             if (!n) {
-                // No complete frame yet. Retry quickly without spinning.
-                next_frame = now + period_us / 4;
+                // Keep the pacing phase. The loop sleeps and pumps ICE/SCTP
+                // before trying again; an empty slot must not cost 25-42 ms.
             } else if (stale) {
                 stats_bump(&stats.stale_frames);
-                next_frame = now + period_us;
-            } else if (same) {
-                // The viewer already shows this exact JPEG. Do not spend
-                // Wi-Fi airtime until it changes or the keepalive expires.
-                stats_bump(&stats.skipped_identical);
-                next_frame = now + period_us;
             } else {
-                offset = 0; send_since = now; next_frame = now + period_us;
-                size = n; pending_size = n; pending_crc = got.crc32;
+                offset = 0; packet_size = 0; send_since = now;
+                next_frame = sender_next_slot(next_frame, now, period_us);
+                size = n;
                 frame_id++;
             }
         }
@@ -307,33 +295,56 @@ static void peer_task(void *arg)
             stats_bump(&stats.dropped_frames);
             size = 0; next_frame = now;
         }
-        if (size) {
+        // Amortize the event-loop receive timeout and task delay across up to
+        // four chunks. Bound each burst so ACK/SACK/ICE processing still runs.
+        int64_t burst_start = esp_timer_get_time();
+        for (int chunk = 0; size && chunk < SENDER_BURST_CHUNKS; chunk++) {
+            now = esp_timer_get_time();
+            if (now - burst_start >= SENDER_BURST_US) break;
+            if (now - send_since > budget_us) {
+                stats_bump(&stats.dropped_frames);
+                size = 0; next_frame = now;
+                break;
+            }
             size_t n = size - offset;
             if (n > JPEG_CHUNK) n = JPEG_CHUNK;
-            memcpy(packet, "JPG1", 4);
-            put32(packet + 4, frame_id); put32(packet + 8, size);
-            put32(packet + 12, offset); put32(packet + 16, (uint32_t)(send_since / 1000));
-            memcpy(packet + 20, frame + offset, n);
+            if (!packet_size) {
+                memcpy(packet, "JPG1", 4);
+                put32(packet + 4, frame_id); put32(packet + 8, size);
+                put32(packet + 12, offset); put32(packet + 16, (uint32_t)(send_since / 1000));
+                memcpy(packet + 20, frame + offset, n);
+                packet_size = n + 20;
+            }
             esp_peer_data_frame_t data = {.type = ESP_PEER_DATA_CHANNEL_DATA,
-                .stream_id = stream_id, .data = packet, .size = n + 20};
+                .stream_id = stream_id, .data = packet, .size = packet_size};
             int ret = esp_peer_send_data(peer, &data);
             if (!ret) {
                 offset += n;
+                packet_size = 0;
                 if (offset == size) {
-                    stats_frame_sent(pending_size);
-                    last_crc = pending_crc; last_size = pending_size; have_last = true;
-                    last_sent_at = now;
+                    now = esp_timer_get_time();
+                    stats_frame_sent(size, now - send_since);
                     awaiting_ack = frame_id; ack_since = now; ack_pending = true;
                     size = 0;
                 }
-            } else if (ret != ESP_PEER_ERR_WOULD_BLOCK) {
-                stats_bump(&stats.send_errors);
-                size = 0; next_frame = now;
+            } else {
+                if (ret == ESP_PEER_ERR_WOULD_BLOCK) {
+                    stats_bump(&stats.would_block);
+                } else {
+                    stats_bump(&stats.send_errors);
+                    size = 0; next_frame = now;
+                }
+                break;
             }
         }
         if (now - last_log >= 5000000) {
             sender_stats_t s;
-            portENTER_CRITICAL(&stats_mux); s = stats; portEXIT_CRITICAL(&stats_mux);
+            portENTER_CRITICAL(&stats_mux);
+            stats.send_fps_milli = (uint64_t)(stats.sent_frames - sampled_sent) * 1000000000ULL / (now - last_log);
+            stats.display_fps_milli = (uint64_t)(stats.acked_frames - sampled_acked) * 1000000000ULL / (now - last_log);
+            s = stats;
+            portEXIT_CRITICAL(&stats_mux);
+            sampled_sent = s.sent_frames; sampled_acked = s.acked_frames;
             ESP_LOGI(TAG, "sent %"PRIu32" frames, %"PRIu64" KiB, skip %"PRIu32
                      ", stale %"PRIu32", drop %"PRIu32", err %"PRIu32", ack %"PRIu32
                      ", fps %d, motion %d", s.sent_frames, (s.sent_bytes + 1023) / 1024,
@@ -472,7 +483,9 @@ static void signaling_task(void *arg)
             }
             free(answer);
         }
-        vTaskDelay(pdMS_TO_TICKS(ret_delay(status)));
+        // Once streaming, four new HTTP connections per second needlessly
+        // compete with DTLS/SCTP and Wi-Fi. Keep reconnect polling at 1 Hz.
+        vTaskDelay(pdMS_TO_TICKS(webrtc_video_active() ? 1000 : ret_delay(status)));
     }
 }
 

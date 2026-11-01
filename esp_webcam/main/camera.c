@@ -7,7 +7,6 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_intr_alloc.h"
-#include "esp_rom_crc.h"
 #include "esp_timer.h"
 #include "usb/usb_host.h"
 #include "usb/uvc_host.h"
@@ -19,7 +18,6 @@ static SemaphoreHandle_t unplugged;
 static uint8_t *latest;
 static size_t latest_size;
 static uint32_t latest_sequence;
-static uint32_t latest_crc;
 static int64_t latest_at;
 static const char *TAG = "camera";
 static portMUX_TYPE status_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -88,11 +86,9 @@ static bool frame_cb(const uvc_host_frame_t *f, void *ctx)
                  (unsigned)f->data_len, (int)reason);
         return true;
     }
-    uint32_t crc = esp_rom_crc32_le(0, f->data, (uint32_t)jpeg_size);
     if (xSemaphoreTake(lock, 0) == pdTRUE) {
         memcpy(latest, f->data, jpeg_size);
         latest_size = jpeg_size;
-        latest_crc = crc;
         latest_sequence++;
         latest_at = esp_timer_get_time();
         xSemaphoreGive(lock);
@@ -130,7 +126,6 @@ size_t camera_read_frame(uint8_t *out, camera_frame_info_t *info)
         memcpy(out, latest, n);
     }
     info->sequence = latest_sequence;
-    info->crc32 = latest_crc;
     info->size = latest_size;
     info->captured_us = latest_at;
     xSemaphoreGive(lock);

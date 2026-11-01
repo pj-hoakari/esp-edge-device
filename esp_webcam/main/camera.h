@@ -16,7 +16,6 @@ size_t camera_read(uint8_t *out, uint32_t *sequence);
 
 typedef struct {
     uint32_t sequence;     /* in: last sequence seen; out: latest sequence */
-    uint32_t crc32;        /* CRC of the trimmed JPEG payload */
     size_t size;           /* latest JPEG size (0 when no new frame was copied) */
     int64_t captured_us;   /* esp_timer timestamp when the frame was published */
 } camera_frame_info_t;

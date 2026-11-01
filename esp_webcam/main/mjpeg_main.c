@@ -126,7 +126,7 @@ static esp_err_t diagnostics(httpd_req_t *req)
         "\"last_frame_bytes\":%"PRIu32",\"width\":%u,\"height\":%u,"
         "\"last_frame_age_ms\":%"PRId64",\"last_open_error\":\"%s\","
         "\"requested_width\":%d,\"requested_height\":%d,\"capture_fps\":%d,"
-        "\"send_fps\":%d,\"idle_fps\":%d,\"motion_threshold\":%d,"
+        "\"send_fps\":%d,\"minimum_fps\":6,"
         "\"expected_vid\":%d,\"expected_pid\":%d,\"psram_free\":%u,"
         "\"usb_control_max\":%d,\"usb_fifo_bias\":\"%s\","
         "\"trimmed_jpegs\":%"PRIu32",\"trimmed_bytes\":%"PRIu32","
@@ -140,7 +140,7 @@ static esp_err_t diagnostics(httpd_req_t *req)
         s.buffer_overflows, s.transfer_errors, s.last_frame_bytes, s.width, s.height,
         age, esp_err_to_name(s.last_open_error),
         CAMERA_WIDTH, CAMERA_HEIGHT, CONFIG_WEBCAM_CAMERA_FPS,
-        CONFIG_WEBCAM_TARGET_FPS, CONFIG_WEBCAM_IDLE_FPS, CONFIG_WEBCAM_MOTION_THRESHOLD,
+        CONFIG_WEBCAM_TARGET_FPS,
         CONFIG_WEBCAM_CAMERA_VID, CONFIG_WEBCAM_CAMERA_PID,
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
         CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE, fifo_bias,
@@ -156,7 +156,7 @@ static esp_err_t diagnostics(httpd_req_t *req)
 
 static esp_err_t rtc_status(httpd_req_t *req)
 {
-    char json[640];
+    char json[1024];
     int len = webrtc_status_json(json, sizeof(json));
     if (len < 0 || len >= sizeof(json))
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "RTC status buffer too small");
