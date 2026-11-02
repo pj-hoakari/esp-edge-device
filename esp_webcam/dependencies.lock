@@ -1,4 +1,14 @@
 dependencies:
+  espressif/cjson:
+    component_hash: e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.7.19~2
   espressif/esp_libsrtp:
     component_hash: 131560184c73ec09f77d8904a2db709307803f0f9f111898921b6966776eac15
     dependencies: []
@@ -17,9 +27,10 @@ dependencies:
       type: local
     version: 1.6.0
 direct_dependencies:
+- espressif/cjson
 - espressif/esp_libsrtp
 - idf
 - usb
-manifest_hash: a5dc77122765903c18b819051f6f485f2228df5d53cac60803c940ab097ed99b
+manifest_hash: ddc167304b7cab948517e5d4c058e410380fe88f20b67ccac0459af589653cb4
 target: esp32s3
 version: 3.0.0
