@@ -1,0 +1,69 @@
+{
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    "extends": ["config:best-practices"],
+    "minimumReleaseAge": "7 days",
+    "internalChecksFilter": "strict",
+    "postUpdateOptions": ["gomodTidy"],
+    "timezone": "Asia/Tokyo",
+    "osvVulnerabilityAlerts": true,
+    "vulnerabilityAlerts": {
+        "labels": ["security"],
+        "minimumReleaseAge": null
+    },
+    "packageRules": [
+        {
+            "description": "Automerge non-breaking minor updates individually",
+            "matchUpdateTypes": ["minor"],
+            "matchJsonata": ["isBreaking != true"],
+            "automerge": true,
+            "addLabels": ["automerge"]
+        },
+        {
+            "description": "Automerge non-breaking patch and digest updates individually",
+            "matchUpdateTypes": ["patch", "digest"],
+            "matchJsonata": ["isBreaking != true"],
+            "automerge": true,
+            "addLabels": ["automerge"]
+        },
+        {
+            "matchUpdateTypes": ["lockFileMaintenance", "pin", "pinDigest"],
+            "minimumReleaseAge": null
+        },
+        {
+            "description": "Update the shared composite actions without waiting",
+            "matchPackageNames": ["pj-hoakari/actions"],
+            "minimumReleaseAge": null
+        },
+        {
+            "description": "Bump go directive in go.mod to the latest Go release",
+            "matchManagers": ["gomod"],
+            "matchDepNames": ["go"],
+            "matchDepTypes": ["golang"],
+            "rangeStrategy": "bump"
+        },
+        {
+            "description": "Group Go version updates: go/toolchain directives in go.mod",
+            "matchDatasources": ["golang-version"],
+            "groupName": "Go version",
+            "internalChecksFilter": "none",
+            "platformAutomerge": false
+        },
+        {
+            "description": "Group Go version updates: mise and asdf (github-tags golang/go)",
+            "matchDatasources": ["github-tags"],
+            "matchPackageNames": ["golang/go"],
+            "groupName": "Go version",
+            "internalChecksFilter": "none",
+            "platformAutomerge": false
+        },
+        {
+            "description": "Group Dockerfile golang image updates with the Go version group",
+            "matchDatasources": ["docker"],
+            "matchPackageNames": ["/(^|/)golang$/"],
+            "groupName": "Go version",
+            "internalChecksFilter": "none",
+            "platformAutomerge": false
+        }
+    ],
+    "platformAutomerge": true
+}
