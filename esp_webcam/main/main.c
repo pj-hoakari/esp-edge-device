@@ -11,8 +11,6 @@
 #include "freertos/semphr.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
-#include "esp_http_client.h"
-#include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_peer_default.h"
@@ -22,6 +20,7 @@
 #include "perf.h"
 #include "nvs.h"
 #include "network_settings.h"
+#include "cloud_signaling.h"
 
 /* All peer APIs are called by peer_task; callbacks execute in that task too. */
 static const char *TAG = "webcam";
@@ -29,9 +28,9 @@ static esp_peer_handle_t peer;
 static QueueHandle_t commands;
 static SemaphoreHandle_t answer_lock;
 static char *pending_answer;
-static uint32_t pending_answer_id;
+static char pending_answer_session[64];
 static int64_t pending_answer_at;
-static uint32_t active_session;
+static char active_session_id[64];
 static uint16_t stream_id;
 static atomic_bool channel_open;
 static bool jpeg_channel_created;
@@ -50,7 +49,7 @@ static atomic_bool tuning_saved;
 static atomic_bool fast_rx = true;
 static char stun_url[] = CONFIG_WEBCAM_STUN_URL;
 static esp_peer_ice_server_cfg_t ice_server = {.stun_url = stun_url};
-typedef struct { char *sdp; uint32_t id; } command_t;
+typedef struct { char *sdp; char session_id[64]; } command_t;
 
 typedef struct {
     uint32_t sent_frames, send_errors, dropped_frames;
@@ -166,13 +165,13 @@ static int on_msg(esp_peer_msg_t *msg, void *ctx)
     if (msg->type == ESP_PEER_MSG_TYPE_SDP) {
         char *copy = strndup((char *)msg->data, msg->size);
         // Only publish an answer. Initial ICE gathering may report an offer.
-        // Hold the answer briefly in signaling_task so the last candidate
-        // update from gathering wins before it is posted to the Node server.
+        // Hold the answer briefly so the last candidate update from gathering
+        // wins before cloud signaling writes it to Firestore.
         if (!copy || strstr(copy, "a=setup:actpass")) { free(copy); return 0; }
         xSemaphoreTake(answer_lock, portMAX_DELAY);
         free(pending_answer);
         pending_answer = copy;
-        pending_answer_id = active_session;
+        memcpy(pending_answer_session, active_session_id, sizeof(pending_answer_session));
         pending_answer_at = esp_timer_get_time() + 300000;
         xSemaphoreGive(answer_lock);
     }
@@ -291,7 +290,7 @@ static void peer_task(void *arg)
         command_t cmd;
         if (xQueueReceive(commands, &cmd, 0) == pdTRUE) {
             if (peer) { esp_peer_close(peer); peer = NULL; }
-            active_session = cmd.id;
+            memcpy(active_session_id, cmd.session_id, sizeof(active_session_id));
             channel_open = false; jpeg_channel_created = false; ack_pending = false;
             size = 0; offset = 0; packet_size = 0; info.sequence = 0;
             next_frame = 0; last_ack_id = 0;
@@ -434,143 +433,38 @@ static void peer_task(void *arg)
     }
 }
 
-#define SDP_MAX 32768
-
-static void build_url(char *out, size_t size, const char *path)
+bool webrtc_submit_offer(const char *sdp, const char *session_id)
 {
-    snprintf(out, size, "%s%s", network_settings_active()->signaling_url, path);
-}
-
-// Small blocking HTTP request used only by signaling_task. The SDP bodies are
-// bounded so the task can return to polling quickly even on a dead server.
-static int http_request(const char *url, const char *body, char *out, size_t out_size,
-                        int *status)
-{
-    esp_http_client_config_t cfg = {
-        .url = url,
-        .timeout_ms = 5000,
-        .keep_alive_enable = false,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) return -1;
-    int body_len = body ? (int)strlen(body) : 0;
-    if (body) {
-        esp_http_client_set_method(client, HTTP_METHOD_POST);
-        esp_http_client_set_header(client, "Content-Type", "application/sdp");
-    }
-    esp_err_t err = esp_http_client_open(client, body_len);
-    if (err == ESP_OK && body && esp_http_client_write(client, body, body_len) != body_len)
-        err = ESP_FAIL;
-    if (err == ESP_OK && esp_http_client_fetch_headers(client) < 0)
-        err = ESP_FAIL;
-    int total = 0;
-    if (err == ESP_OK && out && out_size) {
-        while (total < (int)out_size - 1) {
-            int n = esp_http_client_read(client, out + total, (int)out_size - 1 - total);
-            if (n < 0) { err = ESP_FAIL; break; }
-            if (n == 0) break;
-            total += n;
-        }
-        out[total] = 0;
-    }
-    *status = esp_http_client_get_status_code(client);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    return err == ESP_OK ? total : -1;
-}
-
-static int ret_delay(int status)
-{
-    return status == 0 ? 1000 : 250;
-}
-
-static void submit_offer(const char *sdp, uint32_t id)
-{
+    if (!commands || !sdp || !session_id) return false;
     char *copy = strdup(sdp);
-    if (!copy) return;
-    command_t cmd = {.sdp = copy, .id = id};
+    if (!copy) return false;
+    command_t cmd = {.sdp = copy};
+    snprintf(cmd.session_id, sizeof(cmd.session_id), "%s", session_id);
     if (xQueueSend(commands, &cmd, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "Offer queue full; dropping offer %"PRIu32, id);
+        ESP_LOGW(TAG, "Offer queue full; dropping session %s", session_id);
         free(copy);
-        return;
+        return false;
     }
     xSemaphoreTake(answer_lock, portMAX_DELAY);
     free(pending_answer);
     pending_answer = NULL;
     xSemaphoreGive(answer_lock);
-    ESP_LOGI(TAG, "Signaling offer %"PRIu32" (%u bytes)", id, (unsigned)strlen(sdp));
+    return true;
 }
 
-static void signaling_task(void *arg)
+bool webrtc_take_answer(char **sdp, char *session_id, size_t size)
 {
-    /* Paths contain only a fixed endpoint and a decimal uint32 session ID. */
-    char offer_url[64], answer_url[64];
-    char *sdp = malloc(SDP_MAX);
-    char *reply = malloc(512);
-    assert(sdp && reply);
-    uint32_t last_offer_id = 0;
-    int64_t next_offer_at = 0;
-    for (;;) {
-        int status = 0;
-        char url[NETWORK_SIGNALING_SIZE + sizeof(offer_url)];
-        // While a viewer is connected no new offer is needed, so avoid the
-        // expensive TLS handshake entirely. The peer closes on SCTP close or
-        // after 10 s without an ACK, which makes the condition true again.
-        if (!webrtc_video_active() && esp_timer_get_time() >= next_offer_at) {
-            snprintf(offer_url, sizeof(offer_url), "/api/esp/offer?seen=%"PRIu32, last_offer_id);
-            build_url(url, sizeof(url), offer_url);
-            int got = http_request(url, NULL, sdp, SDP_MAX, &status);
-            if (got > 0 && status == 200) {
-                char *line = strchr(sdp, '\n');
-                if (line) {
-                    *line = 0;
-                    uint32_t id = (uint32_t)strtoul(sdp, NULL, 10);
-                    if (id && id != last_offer_id) {
-                        submit_offer(line + 1, id);
-                        last_offer_id = id;
-                    }
-                }
-            }
-            next_offer_at = esp_timer_get_time() + (int64_t)ret_delay(status) * 1000;
-        }
-
-        char *answer = NULL;
-        uint32_t answer_id = 0;
-        int64_t now = esp_timer_get_time();
-        xSemaphoreTake(answer_lock, portMAX_DELAY);
-        if (pending_answer && now >= pending_answer_at) {
-            answer = pending_answer;
-            answer_id = pending_answer_id;
-            pending_answer = NULL;
-        }
-        xSemaphoreGive(answer_lock);
-        if (answer) {
-            snprintf(answer_url, sizeof(answer_url), "/api/esp/answer?id=%"PRIu32, answer_id);
-            build_url(url, sizeof(url), answer_url);
-            int post_status = 0;
-            int ret = http_request(url, answer, reply, 512, &post_status);
-            if (ret < 0) {
-                // Restore only if no newer answer arrived while posting.
-                xSemaphoreTake(answer_lock, portMAX_DELAY);
-                if (!pending_answer) {
-                    pending_answer = answer;
-                    pending_answer_id = answer_id;
-                    pending_answer_at = esp_timer_get_time() + 500000;
-                    answer = NULL;
-                }
-                xSemaphoreGive(answer_lock);
-                ESP_LOGW(TAG, "Answer POST failed; will retry");
-            } else if (post_status == 200) {
-                ESP_LOGI(TAG, "Signaling answer %"PRIu32" sent", answer_id);
-            } else {
-                ESP_LOGW(TAG, "Answer %"PRIu32" rejected: HTTP %d", answer_id, post_status);
-            }
-            free(answer);
-        }
-        // Check for a pending answer promptly; offer polling is paced above.
-        vTaskDelay(pdMS_TO_TICKS(250));
+    if (!sdp || !session_id || !size) return false;
+    *sdp = NULL;
+    int64_t now = esp_timer_get_time();
+    xSemaphoreTake(answer_lock, portMAX_DELAY);
+    if (pending_answer && now >= pending_answer_at) {
+        *sdp = pending_answer;
+        pending_answer = NULL;
+        snprintf(session_id, size, "%s", pending_answer_session);
     }
+    xSemaphoreGive(answer_lock);
+    return *sdp != NULL;
 }
 
 void webrtc_start(void)
@@ -585,7 +479,7 @@ void webrtc_start(void)
     assert(xTaskCreatePinnedToCore(peer_task, "webrtc", 16384, NULL, 6, NULL, 1) == pdPASS);
     if (network_settings_active()->signaling_url[0]) {
         ESP_LOGI(TAG, "Signaling server: %s", network_settings_active()->signaling_url);
-        assert(xTaskCreatePinnedToCore(signaling_task, "signal", 8192, NULL, 5, NULL, 0) == pdPASS);
+        cloud_signaling_start();
     } else {
         ESP_LOGW(TAG, "Signaling server disabled; WebRTC will not start");
     }

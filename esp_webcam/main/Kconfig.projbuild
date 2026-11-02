@@ -37,27 +37,43 @@ config WEBCAM_DATACHANNEL_RETRANSMITS
         browser and replaced by the next frame, which saves retransmission
         bandwidth on a lossy Wi-Fi link.
 config WEBCAM_SIGNALING_URL
-    string "Node signaling server base URL (empty disables WebRTC)"
-    default "http://192.168.137.1:8080"
+    string "Edge Bridge base URL (empty disables WebRTC)"
+    default "http://192.168.137.1:8787"
     help
         Saved UART network settings take precedence. Use the signaling
         command, then reboot, to change the server without rebuilding.
-        Base URL of the viewer-server at the repository root. The ESP polls
-        this server for SDP offers and posts answers; the browser is served by
-        the same server. Use an address the ESP can reach, for example the PC
-        hotspot gateway. http:// defaults to port 8080 and https:// to 443.
-        HTTPS validates the server with the ESP-IDF CA bundle. The ESP's own
-        HTTP server keeps only camera debug endpoints. Leave empty to run the
-        MJPEG diagnostics without WebRTC.
+        Base URL of tolo-edge-bridge. The ESP calls IssueFirestoreToken and
+        then reads/writes the Firestore signaling documents. Use an address
+        the ESP can reach. http:// defaults to port 8080 and https:// to 443.
+        HTTPS validates the server with the ESP-IDF CA bundle. Leave empty to
+        run the MJPEG diagnostics without WebRTC.
+config WEBCAM_EDGE_DEVICE_ID
+    string "Edge device ID (16 lowercase hex)"
+    default ""
+    help
+        Public ID of this ESP camera in the signaling path. It is not a
+        credential. Use the same value in the observation page's ?camera=.
+config WEBCAM_FIREBASE_PROJECT_ID
+    string "Firebase project ID"
+    default ""
+config WEBCAM_FIREBASE_API_KEY
+    string "Firebase Web API key"
+    default ""
+config WEBCAM_FIRESTORE_EMULATOR_HOST
+    string "Firestore emulator host:port (empty = production)"
+    default ""
+config WEBCAM_AUTH_EMULATOR_HOST
+    string "Firebase Auth emulator host:port (empty = production)"
+    default ""
 config WEBCAM_STUN_URL
     string "STUN server URL (empty disables)"
     default "stun:stun.l.google.com:19302"
     help
-        STUN server used by the ESP ICE agent. The viewer server publishes the
-        browser's STUN setting from its own STUN_URL environment variable, so
-        keep both values aligned. STUN only discovers the server-reflexive
-        address; TURN relay and authentication are not configured. Leave empty
-        on a LAN without Internet access to use host candidates only.
+        STUN server used by the ESP ICE agent. Keep it aligned with the
+        observation page's ICE_SERVERS in tolo-web. STUN only discovers the
+        server-reflexive address; TURN relay and authentication are not
+        configured. Leave empty on a LAN without Internet access to use host
+        candidates only.
 config WEBCAM_CAMERA_VID
     hex "UVC camera VID (0 matches any vendor)"
     range 0x0 0xffff

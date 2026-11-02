@@ -15,6 +15,7 @@
 #include "mbedtls/base64.h"
 #include "network_diagnostics.h"
 #include "network_probes.h"
+#include "cloud_settings.h"
 
 static const char *TAG = "network_config";
 /* Active settings are immutable after load: HTTP/peer tasks can read without
@@ -293,6 +294,61 @@ static void configure_signaling(void)
     wipe(&next, sizeof(next));
 }
 
+static void configure_cloud(void)
+{
+    cloud_settings_t next = *cloud_settings_saved();
+    char edge[CLOUD_EDGE_ID_SIZE];
+    char project[CLOUD_PROJECT_SIZE];
+    char key[CLOUD_API_KEY_SIZE];
+    char firestore[CLOUD_HOST_SIZE];
+    char auth[CLOUD_HOST_SIZE];
+    puts("Cloud signaling setup. The Edge Bridge URL is set by the signaling command.");
+    puts("Ctrl-C cancels. The event_access token is set separately with token.");
+    if (!read_line("Edge device ID (16 lowercase hex): ", edge, sizeof(edge), false)) goto done;
+    if (!read_line("Firebase project ID: ", project, sizeof(project), false)) goto done;
+    if (!read_line("Firebase Web API key: ", key, sizeof(key), false)) goto done;
+    if (!read_line("Firestore emulator host:port (empty = production): ", firestore, sizeof(firestore), false)) goto done;
+    if (!read_line("Auth emulator host:port (empty = production): ", auth, sizeof(auth), false)) goto done;
+    snprintf(next.edge_device_id, sizeof(next.edge_device_id), "%s", edge);
+    snprintf(next.firebase_project_id, sizeof(next.firebase_project_id), "%s", project);
+    snprintf(next.firebase_api_key, sizeof(next.firebase_api_key), "%s", key);
+    snprintf(next.firestore_emulator_host, sizeof(next.firestore_emulator_host), "%s", firestore);
+    snprintf(next.auth_emulator_host, sizeof(next.auth_emulator_host), "%s", auth);
+    if (!cloud_settings_valid(&next)) {
+        puts("Invalid cloud settings. Edge ID must be 16 lowercase hex; project/API key are required; hosts are host[:port] or empty.");
+    } else if (cloud_settings_save(&next)) {
+        puts("Cloud settings saved. Set token, then reboot.");
+    } else {
+        puts("Cloud settings save failed.");
+    }
+done:
+    wipe(edge, sizeof(edge)); wipe(project, sizeof(project)); wipe(key, sizeof(key));
+    wipe(firestore, sizeof(firestore)); wipe(auth, sizeof(auth));
+    wipe(&next, sizeof(next));
+}
+
+static void configure_cloud_token(void)
+{
+    cloud_settings_t next = *cloud_settings_saved();
+    char *token = calloc(1, CLOUD_TOKEN_SIZE);
+    if (!token) { puts("No token buffer."); return; }
+    puts("Paste the event_access JWT. It is masked. Ctrl-C cancels.");
+    if (!read_line("event_access: ", token, CLOUD_TOKEN_SIZE, true)) goto done;
+    if (!cloud_settings_apply_token(&next, token)) {
+        puts("Invalid event_access token: expected a JWT with tenant_id, event_id, exp and token_use=event_access.");
+        goto done;
+    }
+    if (!cloud_settings_save(&next)) {
+        puts("Token parsed but not saved. Run cloud first and check the profile.");
+        goto done;
+    }
+    printf("Token saved: tenant=%s event=%s expires=%lld. Type reboot to apply.\n",
+           next.tenant_id, next.event_id, (long long)next.event_access_expires_at);
+done:
+    wipe(token, CLOUD_TOKEN_SIZE); free(token);
+    wipe(&next, sizeof(next));
+}
+
 static void show_settings(const char *label, const network_settings_t *s)
 {
     printf("%s\n  SSID: %s\n  Password: %s\n  Signaling: %s\n", label,
@@ -312,7 +368,7 @@ static void show_settings(const char *label, const network_settings_t *s)
 
 static void console_task(void *arg)
 {
-    puts("\nNetwork setup ready. Commands: help, show, ping [IPv4], check signaling/stun, wifi, eap, protocols, credentials, clock, signaling, reboot, logs on/off.");
+    puts("\nNetwork setup ready. Commands: help, show, ping [IPv4], check signaling/stun, wifi, eap, protocols, credentials, clock, signaling, cloud, token, reboot, logs on/off.");
     puts("UART logs paused. Disable terminal local echo. Password is masked.");
     puts("Use logs on to monitor; press Enter to pause logs and return to setup.");
     for (;;) {
@@ -340,6 +396,8 @@ static void console_task(void *arg)
             puts("Import: credential ca/client/key/pac. Clear: credential-clear ca/client/key/pac.");
         }
         else if (!strcmp(command, "signaling")) configure_signaling();
+        else if (!strcmp(command, "cloud")) configure_cloud();
+        else if (!strcmp(command, "token")) configure_cloud_token();
         else if (!strcmp(command, "ping")) network_diagnostics_ping("");
         else if (!strncmp(command, "ping ", 5)) network_diagnostics_ping(command + 5);
         else if (!strcmp(command, "check signaling")) network_probes_signaling();
@@ -349,6 +407,8 @@ static void console_task(void *arg)
             network_diagnostics_show();
             show_settings("Active (this boot):", &active);
             show_settings("Saved (next boot):", &saved);
+            cloud_settings_show("Cloud active (this boot):", cloud_settings_active());
+            cloud_settings_show("Cloud saved (next boot):", cloud_settings_saved());
         } else if (!strcmp(command, "logs on")) {
             puts("UART logs enabled. Press Enter to pause and return to setup.");
             fflush(stdout);
@@ -360,7 +420,7 @@ static void console_task(void *arg)
             fflush(stdout);
             uart_wait_tx_done(CONFIG_ESP_CONSOLE_UART_NUM, pdMS_TO_TICKS(500));
             esp_restart();
-        } else if (command[0]) puts("Commands: help, show, ping [IPv4], check signaling/stun, wifi, eap, protocols, credentials, clock, signaling, reboot, logs on/off. Settings apply on reboot.");
+        } else if (command[0]) puts("Commands: help, show, ping [IPv4], check signaling/stun, wifi, eap, protocols, credentials, clock, signaling, cloud, token, reboot, logs on/off. Settings apply on reboot.");
         wipe(command, sizeof(command));
     }
 }
@@ -370,6 +430,6 @@ void network_settings_console_start(void)
     ESP_ERROR_CHECK(uart_driver_install(CONFIG_ESP_CONSOLE_UART_NUM, 1024, 0, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_set_baudrate(CONFIG_ESP_CONSOLE_UART_NUM, CONFIG_ESP_CONSOLE_UART_BAUDRATE));
     atomic_store(&uart_logs, false);
-    if (xTaskCreate(console_task, "net_console", 8192, NULL, 2, NULL) != pdPASS)
+    if (xTaskCreate(console_task, "net_console", 12288, NULL, 2, NULL) != pdPASS)
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
 }

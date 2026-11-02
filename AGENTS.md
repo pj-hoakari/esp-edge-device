@@ -162,6 +162,15 @@ NVSの設定・証明書は保持し、書き込み後はbootloaderで待機。I
 描画6.394fps、送信エラー0、破棄5を確認した。診断用の相手IP表示は実装後に撤去し、
 書き込んでいない。`viewer-server/tools/benchmark-browser.mjs`は`VIEWER_URL`で
 Tunnel先を指定できる。appは1,383,056 bytes（0x151a90、アプリ領域10%空き）。
+2026-11-02、シグナリングを tolo-edge-bridge の Firestore 方式へ移行した。
+ESP は viewer-server を使わず、`signaling`（Edge Bridge の base URL）、`cloud`
+（Firebase project/API key/emulator ホスト、edgeDeviceId）、`token`（事前発行 event_access）
+をシリアルで設定する。ESP は IssueFirestoreToken → Firebase Auth → Firestore REST の
+ポーリングで sessions/signals を読み書きし、観測ページ（console 役）と `jpeg` DataChannel を
+確立する。観測ページは `?camera=<ESPのedgeDeviceId>` で ESP を映像ソースにする。
+viewer-server の HTTP ポーリング経路は非使用。設定・手順は README の
+「tolo-edge-bridge 接続」と `tolo-web/README.md` の「ESP32 カメラを観測ページにつなぐ」を参照する。
+
 作業開始時に実際の構成を確認し、構成変更に合わせてこの文書を更新する。
 
 ## 作業の進め方

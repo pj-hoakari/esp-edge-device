@@ -20,6 +20,7 @@
 #include "webrtc.h"
 #include "perf.h"
 #include "network_settings.h"
+#include "cloud_settings.h"
 #include "wifi_auth.h"
 
 static const char *TAG = "mjpeg";
@@ -293,6 +294,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
     network_settings_load();
+    cloud_settings_load();
     network_settings_console_start();
     if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) < 4 * 1024 * 1024) {
         ESP_LOGE(TAG, "Octal PSRAM missing"); return;

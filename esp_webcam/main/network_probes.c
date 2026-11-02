@@ -18,8 +18,8 @@ void network_probes_signaling(void)
     const char *base = network_settings_active()->signaling_url;
     if (!base[0]) { puts("Signaling check: server is disabled."); return; }
     if (!network_diagnostics_has_ipv4()) { puts("Signaling check: no Wi-Fi IPv4 connection."); return; }
-    char url[NETWORK_SIGNALING_SIZE + 5];
-    snprintf(url, sizeof(url), "%s/ice", base);
+    char url[NETWORK_SIGNALING_SIZE + 9];
+    snprintf(url, sizeof(url), "%s/healthz", base);
     printf("Signaling check: GET %s\n", url);
     esp_http_client_config_t config = {
         .url = url, .timeout_ms = 3000, .disable_auto_redirect = true,
@@ -29,8 +29,8 @@ void network_probes_signaling(void)
     if (!client) { puts("Signaling check failed: no HTTP client memory."); return; }
     esp_err_t err = esp_http_client_set_method(client, HTTP_METHOD_GET);
     int64_t start = esp_timer_get_time();
-    /* /ice reads static server configuration, unlike offer/status polling.
-     * Read headers only: never create/consume an offer or download the viewer. */
+    /* /healthz is a read-only readiness endpoint. It does not create a
+     * session or touch the signaling documents. */
     if (err == ESP_OK) err = esp_http_client_open(client, 0);
     if (err == ESP_OK && esp_http_client_fetch_headers(client) < 0) err = ESP_FAIL;
     if (err == ESP_OK) {

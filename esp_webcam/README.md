@@ -1,5 +1,51 @@
 # ESP32-S3 UVCカメラ / MJPEG確認ファームウェア
 
+## tolo-edge-bridge 接続（2026-11追加）
+
+`viewer-server/` は使わず、ESP は tolo-edge-bridge の Firestore シグナリングに
+edge ピアとして参加する。ブラウザ（観測ページ）が ESP セッションの console 役になり、
+`?camera=<ESPのedgeDeviceId>` を付けて開くと ESP の JPEG を DataChannel で受け取る。
+シグナリングは両端ともポーリングで、ESP は Firestore REST を約1秒（offer 待ちは約300ms）
+間隔で読む。映像は従来どおり `jpeg` DataChannel（JPG1 断片）で送る。
+
+必要な設定は NVS の `cloud` と `network` に保存する。Edge Bridge の URL は既存の
+`signaling` コマンド、Firebase と ESP の ID は `cloud`、事前発行した `event_access` は
+`token` で投入する。設定後は `reboot` で反映する。
+
+```text
+signaling            -> http://<Edge Bridge のホスト>:8787
+cloud                -> Edge device ID / Firebase project ID / API key /
+                        Firestore emulator host / Auth emulator host
+                        （エミュレータは ESP から到達できる PC の LAN IP:port）
+token                -> event_access JWT（マスク入力）
+show                 -> active/saved の cloud 設定とトークンの有無を確認
+reboot
+```
+
+`event_access` は tolo-web の開発手順と同じく fakeidp から発行する。
+`client_id` は `edge-page`、`tenant_id` と `event_id` は観測ページを開くイベントに合わせる。
+
+```bash
+curl -sf http://localhost:8082/token \
+  -H 'Content-Type: application/json' \
+  -d '{"token_use":"event_access","sub":"dev-esp","client_id":"edge-page","scope":"events.report","tenant_id":"0123456789abcdef","event_id":"fedcba9876543210","ttl_seconds":86400}' \
+  | jq -r .access_token
+```
+
+トークンの `exp` が切れると ESP は再サインインできない。`token` で再投入して `reboot` する。
+時刻は SNTP（`pool.ntp.org`）で合わせる。オフライン環境では既存の `clock` で設定する。
+Firestore と HTTPS の都合上、ESP の時計が大きくずれていると接続できない。
+
+ESP の `edgeDeviceId` は 16 桁小文字 hex とする。観測ページの管理UI向け URL
+（`.../observation/<観測ページのedgeDeviceId>`）に `?camera=<ESPのedgeDeviceId>` を足す。
+ESP は登録・Heartbeat を持たない。観測点の登録は観測ページ側の edgeDeviceId が担う。
+
+この経路は Firebase Auth のカスタムトークンと Firestore のセキュリティルールをそのまま使う。
+ESP は `IssueFirestoreToken` を event_access 付きで呼び、返ったカスタムトークンで
+Auth にサインインし、`sessions` と `signals` を読み書きする。`viewer-server` の
+`/api/esp/offer`・`/api/esp/answer` はもう使わない。
+契約・設定・確認手順の詳細は [tolo-edge-bridge 接続メモ](../docs/tolo-edge-bridge-20261102.md) を参照する。
+
 ## IP表示・簡易疎通確認（2026-11-02追加）
 
 | コマンド | 確認内容 |
@@ -7,7 +53,7 @@
 | `show` | 現在取得しているIPv4・ネットマスク・ゲートウェイを設定一覧の先頭に表示 |
 | `ping` | 現在のゲートウェイへICMPを3回送信 |
 | `ping 192.0.2.1` | 指定したIPv4へICMPを3回送信し、応答時間と送信/応答数を表示 |
-| `check signaling` | 起動中のシグナリングURLの`GET /ice`でHTTP(S)応答を確認 |
+| `check signaling` | Edge Bridge の`GET /healthz`でHTTP(S)応答を確認 |
 | `check stun` | `WEBCAM_STUN_URL`へUDPのSTUN Binding Requestを1回送って応答を確認 |
 
 これらのコマンドは設定・資材を保存しない。確認コマンドからSDP交換、WebRTC接続、ICEチェック、
@@ -78,8 +124,10 @@ python -m serial.tools.miniterm COM3 115200 --dtr 1 --rts 0 --eol CRLF
 | `protocols` | 使用可能なEAP方式・Enterpriseリンクを表示 |
 | `credentials` | CA・クライアント証明書・秘密鍵・PACの保存有無とサイズを表示 |
 | `clock` | 起動中のUTC Unix秒を設定。証明書の有効期間検証用 |
-| `signaling` | サーバーのIPv4・ホスト名・`http(s)://` URLを入力し保存。`off`でWebRTCを無効化 |
-| `show` | 現在のIP・設定と次回起動用の保存設定を表示。パスワードは設定有無だけ表示 |
+| `signaling` | Edge Bridge のIPv4・ホスト名・`http(s)://` URLを入力し保存。`off`でWebRTCを無効化 |
+| `cloud` | Edge device ID・Firebase project/API key・Firestore/Auth emulator ホストを設定 |
+| `token` | 事前発行した`event_access` JWTをマスク入力で保存 |
+| `show` | 現在のIP・設定と次回起動用の保存設定を表示。パスワード・トークンは設定有無だけ表示 |
 | `ping [IPv4]` | IPv4へ3回のICMP疎通確認。宛先省略時はゲートウェイ |
 | `check signaling` / `check stun` | 設定済みサーバーへの読み取り専用HTTP(S)／UDP Binding疎通確認 |
 | `reboot` | 再起動し、保存したWi-Fi・サーバー設定をまとめて反映 |
@@ -263,7 +311,9 @@ MJPEG用と画面・診断用にHTTPサーバーを分け、配信中も診断�
 以前の「ICE/DTLS成功後にSCTP/DataChannelが開かない」問題は、未送信バグとサーバーの
 候補展開バグを修正して解消済み。切り分けには`/log`を使う。
 
-### ビューアーとシグナリングサーバー
+### ビューアーとシグナリングサーバー（旧方式・現在は非使用）
+
+以下は旧方式の記録である。現在は tolo-edge-bridge の Firestore シグナリングを使うため、`viewer-server/` は起動しない。
 
 `viewer-server/`をPCで起動し、ブラウザで`http://<PCのIP>:8080/`を開く。
 サーバーは画面・`receiver.js`・SDP中継・STUN設定を提供する。
@@ -438,8 +488,9 @@ git submodule update --init --recursive
    ```
 
 4. `ESP webcam`でSSID・パスワード・カメラ対応fps・送信目標fps・
-   `Node signaling server base URL`・`STUN server URL`を入力する。
-   Wi-Fiとサーバーは書き込み後にシリアルで設定してもよい。保存済みNVS設定があればそちらを優先する。
+   `Edge Bridge base URL`・`STUN server URL`を入力する。Firebase と edgeDeviceId、
+   event_access は書き込み後にシリアル（`signaling` / `cloud` / `token`）で設定する。
+   保存済みNVS設定があればそちらを優先する。
    認証情報はローカルの` sdkconfig `とビルド成果物に含まれるため、これらを共有しない。
    ソース・既定値・実行ログには認証情報を記載しない。
 5. ビルドしてUART経由で書き込む。COM番号は実際のポートへ置き換える。
@@ -450,8 +501,9 @@ git submodule update --init --recursive
    ```
 
 6. 給電・USBホスト配線を確認した上で、対象カメラをPCから外してESP側のホストポートへ接続する。
-   PCで`viewer-server`を起動し、同一LANのChrome/Edgeで`http://<PCのIP>:8080/`を開く。
-   「接続」を押すとJPEGを表示する。再接続は「切断」→「接続」。同時接続は1台で、新しいofferが前の接続を置き換える。
+   観測ページ `.../observation/<観測ページのedgeDeviceId>?camera=<ESPのedgeDeviceId>` を開き、
+   映像ソースを開始する。ESP は起動後にセッションを検出して answer を返す。
+   再接続は観測ページの「停止」→「開始」。同時接続は1台。
 7. 作業後はQ:以外へ移動して`subst Q: /D`で割り当てを解除できる。
 
 今回のビルド用に`.tools/esp-idf`も取得した。通常はインストール済みIDF v6.1を使ってよい。
@@ -460,7 +512,8 @@ git submodule update --init --recursive
 `& ./.tools/build-local.ps1 menuconfig`、`& ./.tools/build-local.ps1 build`、
 `& ./.tools/build-local.ps1 -p COM5 flash monitor`でも操作できる。
 `certs/`、`sdkconfig`、`build/`、`.tools/`はGit除外対象。
-ファームウェア自体には接続認証を実装していないため、利用対象は信頼できるLAN内とする。
+シグナリングは event_access で認可するが、ESP の HTTP 診断エンドポイントと
+DataChannel 自体には追加の視聴者認可を実装していない。利用対象は信頼できるLAN内とする。
 
 ## 分割送信と遅延制御
 
