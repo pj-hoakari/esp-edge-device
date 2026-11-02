@@ -41,6 +41,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', default='COM3')
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--build-dir', type=Path,
+                        default=Path(__file__).resolve().parents[1] / 'build',
+                        help='Image directory (default: firmware build; use build-fast for EAP-FAST)')
     args = parser.parse_args()
     raw = serial.Serial()
     raw.port = args.port
@@ -59,7 +62,7 @@ def main():
         print('TARGET:', esp.CHIP_NAME, esp.get_chip_description(), flush=True)
         if args.check:
             return
-        build = Path(__file__).resolve().parents[1] / 'build'
+        build = args.build_dir.resolve()
         files = [(0, build / 'bootloader/bootloader.bin'),
                  (0x8000, build / 'partition_table/partition-table.bin'),
                  (0x10000, build / 'esp_webcam.bin')]

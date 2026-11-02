@@ -1,5 +1,137 @@
 # ESP32-S3 UVCカメラ / MJPEG確認ファームウェア
 
+## IP表示・簡易疎通確認（2026-11-02追加）
+
+| コマンド | 確認内容 |
+| --- | --- |
+| `show` | 現在取得しているIPv4・ネットマスク・ゲートウェイを設定一覧の先頭に表示 |
+| `ping` | 現在のゲートウェイへICMPを3回送信 |
+| `ping 192.0.2.1` | 指定したIPv4へICMPを3回送信し、応答時間と送信/応答数を表示 |
+| `check signaling` | 起動中のシグナリングURLの`GET /ice`でHTTP(S)応答を確認 |
+| `check stun` | `WEBCAM_STUN_URL`へUDPのSTUN Binding Requestを1回送って応答を確認 |
+
+これらのコマンドは設定・資材を保存しない。確認コマンドからSDP交換、WebRTC接続、ICEチェック、
+TURN割当て、認証の再試行を開始する処理は呼ばない。シグナリング側の`/ice`もセッションやESPの
+ポーリング状態を変更しない。HTTPリダイレクトとSTUNの別サーバー誘導・認証要求には追従しない。
+
+`show`はNVSの設定値ではなく、現在のWi-FiインターフェースからIPを取得する。
+未接続・DHCP待ちはその旨を表示し、切断前のキャッシュIPを表示しない。
+pingはIPv4のみでホスト名の解決や追加オプションは持たず、1回の応答待ちと送信間隔は各1000ms。
+実行中はコンソールが結果を待ち、最後の集計より後に`esp>`へ戻る。
+
+シグナリングはHTTPステータスと所要時間を表示し、200以外も「HTTPには到達した」ことが分かる形で示す。
+STUNは`stun:host[:port]`のIPv4 UDPに対応（省略ポート3478）。ホスト名は通常のDNSで解決する。
+UDP応答待ちは3000ms。応答のmagic cookie・要求ID・長さ・Bindingメソッド・アドレス/エラー属性を検証し、
+正常応答、STUNエラー応答、タイムアウト/受信失敗、不正応答を区別する。DNSの待ち時間はSDK設定に従う。
+応答の形式は[RFC 8489](https://www.rfc-editor.org/rfc/rfc8489.html)、pingはSDKの
+[ICMP Echo API](https://github.com/espressif/esp-idf/blob/fff9895c82d744c7237be8847347bdd1b07c6643/components/lwip/include/apps/ping/ping_sock.h)に従う。
+
+`tests/test_network_diagnostics.py`で未接続・古いIP・pingの成功/タイムアウト・繰り返し・開始失敗時の解放、
+`tests/test_network_probes.py`でGET専用・リダイレクトなし・STUN要求1回・異常系の解放をPC上で検証した。
+STUN解析とコマンド分岐のテスト、`GET /ice`の状態不変を含む受信・描画・中継14テストも成功した。
+診断版の通常ビルドは成功（app 1,382,560 bytes、0x1518a0、アプリ領域10%空き）。
+FAST互換版もビルド成功（app 1,364,720 bytes、0x14d2f0、アプリ領域11%空き）。
+診断版の通常版をCOM3経由でESP32-S3へ書き込み、bootloader・partition table・appの
+ハッシュ一致を確認した。保存済みネットワーク設定・証明書のNVS領域は保持した。
+書き込み後はbootloaderで待機。IO0のGND接続を外してENリセットする。
+診断版の通常起動後のIP表示・疎通結果の実機確認は未実施。
+
+## 802.1X/EAP対応（2026-11-02追加）
+
+`eap`でTLS、PEAP/MSCHAPv2、TTLS（EAP/MSCHAPv2/MSCHAP/PAP/CHAP）を選択できる。
+WPA/WPA2/WPA3-EnterpriseとSuite-B 192-bitに対応する設定を追加した。
+FASTはSDKのTLS実装の制約があるため、`sdkconfig.fast.defaults`を使う別ビルドとする。
+`protocols`でそのイメージの対応方式、`credentials`で証明書・鍵・PACの保存状態を確認する。
+従来の通常Wi-Fiは`wifi`、シグナリングサーバーは`signaling`で設定する。
+
+証明書・鍵は`tools/upload_wifi_credential.py`からシリアル経由で登録し、パスワードは非表示にする。
+v1の保存済み設定はSSID・PSK・サーバーURLを保持して移行する。
+通常版は実機へ書き込み・照合済み。通常起動、方式一覧、公開サンプル証明書・鍵の保存と削除を確認した。
+802.1X Wi-Fiへの接続成功はユーザー報告済み。全方式のRADIUS相互運用は未確認。
+操作手順、認証サーバー検証、FASTの制約、ビルド・テスト結果は
+[802.1X/EAP対応メモ](../docs/wifi-enterprise-20261102.md)を参照。
+
+## シリアルからWi-Fi・シグナリングサーバーを設定（2026-11-02追加）
+
+UART0（115200bps / 8N1、ESP GPIO43=TX・GPIO44=RX）で変更し、NVSへ保存する。
+保存した設定は次回起動から使用し、電源を切っても保持する。保存前は従来のmenuconfig設定を使う。
+SSIDが未設定・接続先が圏外・パスワードが違う場合も、シリアルの設定操作は使用できる。
+この機能を使うには、追加後のファームウェアを一度ビルドして書き込む必要がある。
+
+Pico debugprobeの配線はGP4→GPIO44、GP5←GPIO43、GND共通。
+通常起動（IO0のGND接続を解除）し、ESP-IDFのPython環境から次のように端末を開く。
+COM番号は実際のポートに合わせる。既存のログモニターや書き込みツールは終了しておく。
+
+```powershell
+python -m serial.tools.miniterm COM3 115200 --dtr 1 --rts 0 --eol CRLF
+```
+
+ローカルエコーはOFFのまま使う（`--echo`を付けない）。ESPがコマンド・SSID・サーバー入力を表示し、
+パスワードは`*`で表示する。設定コンソール起動後はUARTの診断ログを停止し、入力欄が流れないようにする。
+起動済みならEnterで`esp>`を表示できる。`logs on`でUARTログを表示し、Enterまたは任意の入力で
+ログを止めて設定へ戻る。HTTPの`/log`・`/usb-log`用の記録は、UART表示を止めても継続する。
+
+| コマンド | 操作 |
+| --- | --- |
+| `wifi` | SSID、パスワードを順に入力し保存。空パスワードはオープンネットワーク |
+| `eap` | 802.1X/EAP方式・Identity・認証情報・サーバー検証を設定 |
+| `protocols` | 使用可能なEAP方式・Enterpriseリンクを表示 |
+| `credentials` | CA・クライアント証明書・秘密鍵・PACの保存有無とサイズを表示 |
+| `clock` | 起動中のUTC Unix秒を設定。証明書の有効期間検証用 |
+| `signaling` | サーバーのIPv4・ホスト名・`http(s)://` URLを入力し保存。`off`でWebRTCを無効化 |
+| `show` | 現在のIP・設定と次回起動用の保存設定を表示。パスワードは設定有無だけ表示 |
+| `ping [IPv4]` | IPv4へ3回のICMP疎通確認。宛先省略時はゲートウェイ |
+| `check signaling` / `check stun` | 設定済みサーバーへの読み取り専用HTTP(S)／UDP Binding疎通確認 |
+| `reboot` | 再起動し、保存したWi-Fi・サーバー設定をまとめて反映 |
+| `help` | コマンド一覧を表示 |
+| `logs on` / `logs off` | UARTの診断ログ表示を開始／停止。表示中はEnterだけで停止できる |
+
+例えば`wifi`→SSID→パスワード、`signaling`→`192.168.1.20:8080`、`reboot`の順に入力する。
+各入力の後にEnterを押す。IP・ホスト名だけならHTTPのポート8080を補い、
+`http://192.168.1.20:9000`や`https://viewer.example`のようなURLでは指定ポートを使う
+（URLで省略したポートはHTTP標準の80、HTTPS標準の443）。HTTPSはESP-IDFのCAバンドルで
+サーバー証明書を検証する。パス・クエリー・ユーザー情報・IPv6は受け付けない。
+STUNの設定は引き続きmenuconfigの`WEBCAM_STUN_URL`を使用する。
+
+SSIDは1～32バイト。パスワードは空、8～63バイト、または64桁の16進PSK。
+日本語などはUTF-8のバイト数で数える。空白はそのまま保持する。
+Backspaceで修正、Ctrl-Cで中止できる。長すぎる入力や制御文字を含む行は全体を破棄して保存しない。
+設定は専用NVS名前空間`network`の1つのblobとして保存し、RTC調整値の`rtc_tuning`とは独立する。
+保存済み設定がある場合、menuconfigのWi-Fi・サーバー設定を変えて再ビルドしても保存値を優先する。
+通常の書き込みでは保持され、フラッシュ全消去では失われる。NVS暗号化は本変更では追加していない。
+保存方式はESP-IDFの[NVS API](https://github.com/espressif/esp-idf/blob/master/components/nvs_flash/include/nvs.h)に従い、
+`nvs_set_blob`後に`nvs_commit`する。
+
+入力検証とシリアル行処理のPCテストは`tests/network_settings_test.c`。
+MSVCの開発者コマンドプロンプトでリポジトリ直下から実行できる。
+
+```bat
+cl /nologo /W4 /O2 /Feesp_webcam\.tools\network_settings_test.exe /Foesp_webcam\.tools\ esp_webcam\tests\network_settings_test.c esp_webcam\main\network_settings_values.c
+esp_webcam\.tools\network_settings_test.exe
+```
+
+2026-11-02に上記PCテストと受信・描画・中継13テストが成功。
+ESP-IDF v6.1 / ESP32-S3でビルド・リンク成功（app 1,262,080 bytes、0x134200、アプリ領域18%空き）。
+同日、COM3のPico debugprobe UART経由でESP32-S3 rev.0.2へ書き込み、
+bootloader・partition table・appのハッシュ照合に成功した。書き込み後はbootloaderで待機しているため、
+IO0のGND接続を外してENリセットする。NVS保存・再起動後のWi-Fi/サーバー変更は未検証。
+
+同日、ログで入力欄が流れる問題を修正。設定画面ではUARTログを止め、`logs on`とEnterで切り替える。
+入力エコーとパスワードのマスク表示を追加した。改修後はビルド・リンク成功
+（app 1,262,816 bytes、0x1344e0、アプリ領域18%空き）。
+`tests/test_network_console.py`は実際のコンソール処理をUART/NVSのPC用アダプターで動かし、
+ログ切替、CRLF、通常入力の表示、秘密入力のマスク、キャンセル、NVSからの再読込みを検証する。
+MSVC開発者コマンドプロンプトで`python esp_webcam/tests/test_network_console.py`を実行し、成功した。
+ログ表示修正版も同じCOM3経由で書き込み、全イメージのハッシュ照合に成功。
+IO0のGND接続を外してENリセットした実機で、次を確認した。
+
+- `help`応答とコマンド・SSIDの入力表示。
+- 既定のログ停止中に3秒間のUART追加出力0バイト。
+- `logs on`の応答、Enterでのログ停止・設定画面復帰、再停止後3秒間の追加出力0バイト。
+- Wi-Fi・サーバーの入力欄、パスワードの`*`表示、Ctrl-Cでのキャンセル。
+
+検証ではネットワーク設定を保存していない。確認後はログ停止状態に戻し、COM3を解放した。
+
 ## 開発中のWebRTC高速化版（2026-11-01）
 
 最新目標は1280×720カラー・静止時も6fps以上。既定は10fps受信・10fps送信。改善版はWebRTC DataChannelで映像を送り、
@@ -144,6 +276,8 @@ npm start
 
 ESPのmenuconfigでは`ESP webcam`の`Node signaling server base URL`に
 `http://<PCのIP>:8080`、`STUN server URL`に同じSTUNを設定する。空にするとWebRTCを無効化できる。
+HTTPSを使う場合は`https://<ホスト>`を指定する（ポート省略時は443、CAバンドルで検証）。
+保存済みのシリアル設定がある場合、サーバー変更・無効化は上記の`signaling`コマンドで行う。
 ビューアーの`.local`ホスト候補は、サーバーが到達可能なPC側IPv4へ置換してESPへ渡す
 （localhost接続時はESPと同一サブネットのアドレスを選ぶ）。`a=candidate:`行は保持される。
 詳しいAPIと環境変数は[viewer-server/README.md](../../viewer-server/README.md)を参照。
@@ -305,6 +439,7 @@ git submodule update --init --recursive
 
 4. `ESP webcam`でSSID・パスワード・カメラ対応fps・送信目標fps・
    `Node signaling server base URL`・`STUN server URL`を入力する。
+   Wi-Fiとサーバーは書き込み後にシリアルで設定してもよい。保存済みNVS設定があればそちらを優先する。
    認証情報はローカルの` sdkconfig `とビルド成果物に含まれるため、これらを共有しない。
    ソース・既定値・実行ログには認証情報を記載しない。
 5. ビルドしてUART経由で書き込む。COM番号は実際のポートへ置き換える。

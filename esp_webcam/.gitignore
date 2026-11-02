@@ -1,4 +1,7 @@
 build/
+build-fast/
+sdkconfig.fast
+sdkconfig.fast.old
 managed_components/
 sdkconfig
 sdkconfig.old

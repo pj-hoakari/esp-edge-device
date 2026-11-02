@@ -4,6 +4,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const base=process.env.ESP_URL||'http://192.168.137.145';
+const viewerUrl=process.env.VIEWER_URL||'http://127.0.0.1:8080/';
 const duration=Number(process.env.SECONDS||60);
 if(!Number.isFinite(duration)||duration<=0)throw Error('SECONDS must be positive');
 const debugPort=Number(process.env.CDP_PORT||9227);
@@ -13,7 +14,7 @@ await mkdir(profile,{recursive:true});
 const browser=spawn('C:/Program Files/Google/Chrome/Application/chrome.exe',[
   '--headless=new',`--remote-debugging-port=${debugPort}`,`--user-data-dir=${profile}`,
   '--no-first-run','--no-default-browser-check','--disable-background-timer-throttling',
-  '--disable-renderer-backgrounding','http://127.0.0.1:8080/'
+  '--disable-renderer-backgrounding',viewerUrl
 ],{windowsHide:true,stdio:'ignore'});
 let ws,sequence=0;
 const pending=new Map();
@@ -31,7 +32,7 @@ async function evaluate(expression){const r=await cdp('Runtime.evaluate',{expres
 try{
   let target;
   for(let i=0;i<100;i++){
-    try{const list=await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();target=list.find(t=>t.type==='page'&&t.url.includes('127.0.0.1:8080'));if(target)break;}catch{}
+    try{const list=await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();target=list.find(t=>t.type==='page'&&t.url.includes(new URL(viewerUrl).host));if(target)break;}catch{}
     await sleep(100);
   }
   if(!target)throw Error('Test browser did not start');

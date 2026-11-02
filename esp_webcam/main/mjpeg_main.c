@@ -19,6 +19,8 @@
 #include "camera.h"
 #include "webrtc.h"
 #include "perf.h"
+#include "network_settings.h"
+#include "wifi_auth.h"
 
 static const char *TAG = "mjpeg";
 extern const char page_start[] asm("_binary_mjpeg_html_start");
@@ -48,13 +50,15 @@ static int capture_usb_log(const char *format, va_list args)
         portEXIT_CRITICAL(&log_mux);
     }
     if (strstr(line, "DTLS") || strstr(line, "esp_peer") || strstr(line, "SCTP") ||
-        strstr(line, "ICE") || strstr(line, "webcam:")) {
+        strstr(line, "ICE") || strstr(line, "EAP") || strstr(line, "WPA") || strstr(line, "webcam:")) {
         portENTER_CRITICAL(&log_mux);
         memcpy(rtc_logs[rtc_log_count % LOG_LINES], line, LOG_LINE_SIZE);
         rtc_logs[rtc_log_count % LOG_LINES][LOG_LINE_SIZE - 1] = 0;
         rtc_log_count++;
         portEXIT_CRITICAL(&log_mux);
     }
+    /* Keep HTTP diagnostics even while the interactive UART prompt is quiet. */
+    if (!network_settings_uart_logs_enabled()) return (int)strlen(line);
     return original_log ? original_log(format, args) : vprintf(format, args);
 }
 
@@ -288,6 +292,8 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_erase()); err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    network_settings_load();
+    network_settings_console_start();
     if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) < 4 * 1024 * 1024) {
         ESP_LOGE(TAG, "Octal PSRAM missing"); return;
     }
@@ -299,15 +305,14 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL));
-    wifi_config_t wifi = {0};
-    size_t ssid_len = strlen(CONFIG_WEBCAM_WIFI_SSID), pass_len = strlen(CONFIG_WEBCAM_WIFI_PASSWORD);
-    if (ssid_len > sizeof(wifi.sta.ssid) || pass_len > sizeof(wifi.sta.password)) return;
-    memcpy(wifi.sta.ssid, CONFIG_WEBCAM_WIFI_SSID, ssid_len);
-    memcpy(wifi.sta.password, CONFIG_WEBCAM_WIFI_PASSWORD, pass_len);
+    const network_settings_t *settings = network_settings_active();
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    err = esp_wifi_set_config(WIFI_IF_STA, &wifi);
-    if (err != ESP_OK || !wifi.sta.ssid[0]) {
-        ESP_LOGE(TAG, "Configure Wi-Fi in menuconfig"); return;
+    err = wifi_auth_configure(settings);
+    if (err != ESP_OK) {
+        /* UART logs are paused by default. Keep setup failures visible while
+         * leaving the console alive for missing credentials or bad profiles. */
+        printf("Wi-Fi setup failed: %s. Use wifi/eap/credentials, then reboot.\n", esp_err_to_name(err));
+        return;
     }
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));

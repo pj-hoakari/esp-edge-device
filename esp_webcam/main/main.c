@@ -12,6 +12,7 @@
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_peer_default.h"
@@ -20,6 +21,7 @@
 #include "sender_policy.h"
 #include "perf.h"
 #include "nvs.h"
+#include "network_settings.h"
 
 /* All peer APIs are called by peer_task; callbacks execute in that task too. */
 static const char *TAG = "webcam";
@@ -37,6 +39,7 @@ static volatile int peer_state;
 static uint32_t frame_id, awaiting_ack, last_ack_id;
 static bool ack_pending;
 static int64_t ack_since;
+static int64_t last_ack_us;
 static atomic_int client_motion = -1;
 static atomic_int effective_fps = CONFIG_WEBCAM_TARGET_FPS;
 // Real-device HD benchmarks were faster with ChaCha20 than hardware AES-GCM.
@@ -199,6 +202,7 @@ static int on_open(esp_peer_data_channel_info_t *ch, void *ctx)
 {
     if (ch->label && strcmp(ch->label, "jpeg") == 0) {
         stream_id = ch->stream_id; channel_open = true;
+        last_ack_us = esp_timer_get_time();
     }
     return 0;
 }
@@ -233,6 +237,7 @@ static int on_data(esp_peer_data_frame_t *f, void *ctx)
     if ((int32_t)(ack - last_ack_id) <= 0 || (int32_t)(ack - frame_id) > 0) return 0;
     last_ack_id = ack;
     int64_t now = esp_timer_get_time();
+    last_ack_us = now;
     if (motion >= 0) {
         atomic_store(&client_motion, motion);
     }
@@ -290,6 +295,7 @@ static void peer_task(void *arg)
             channel_open = false; jpeg_channel_created = false; ack_pending = false;
             size = 0; offset = 0; packet_size = 0; info.sequence = 0;
             next_frame = 0; last_ack_id = 0;
+            last_ack_us = esp_timer_get_time();
             atomic_store(&client_motion, -1);
             atomic_store(&effective_fps, CONFIG_WEBCAM_TARGET_FPS);
             stats_reset();
@@ -320,6 +326,15 @@ static void peer_task(void *arg)
             ack_pending = false;
             stats_bump(&stats.no_ack);
             ESP_LOGW(TAG, "No frame acknowledgement for 2 s");
+        }
+        if (peer && channel_open && last_ack_us && now - last_ack_us > 10000000) {
+            // The viewer vanished without closing SCTP. Drop the peer so the
+            // signaling task can resume offer polling for a new viewer.
+            ESP_LOGW(TAG, "No acknowledgement for 10 s; closing peer");
+            esp_peer_close(peer);
+            peer = NULL;
+            channel_open = false;
+            ack_pending = false;
         }
         int cm = atomic_load(&client_motion);
         int fps = CONFIG_WEBCAM_TARGET_FPS;
@@ -423,9 +438,7 @@ static void peer_task(void *arg)
 
 static void build_url(char *out, size_t size, const char *path)
 {
-    size_t len = strlen(CONFIG_WEBCAM_SIGNALING_URL);
-    while (len && CONFIG_WEBCAM_SIGNALING_URL[len - 1] == '/') len--;
-    snprintf(out, size, "%.*s%s", (int)len, CONFIG_WEBCAM_SIGNALING_URL, path);
+    snprintf(out, size, "%s%s", network_settings_active()->signaling_url, path);
 }
 
 // Small blocking HTTP request used only by signaling_task. The SDP bodies are
@@ -437,6 +450,7 @@ static int http_request(const char *url, const char *body, char *out, size_t out
         .url = url,
         .timeout_ms = 5000,
         .keep_alive_enable = false,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) return -1;
@@ -490,27 +504,35 @@ static void submit_offer(const char *sdp, uint32_t id)
 
 static void signaling_task(void *arg)
 {
-    char offer_url[256], answer_url[256];
+    /* Paths contain only a fixed endpoint and a decimal uint32 session ID. */
+    char offer_url[64], answer_url[64];
     char *sdp = malloc(SDP_MAX);
     char *reply = malloc(512);
     assert(sdp && reply);
     uint32_t last_offer_id = 0;
+    int64_t next_offer_at = 0;
     for (;;) {
         int status = 0;
-        snprintf(offer_url, sizeof(offer_url), "/api/esp/offer?seen=%"PRIu32, last_offer_id);
-        char url[320];
-        build_url(url, sizeof(url), offer_url);
-        int got = http_request(url, NULL, sdp, SDP_MAX, &status);
-        if (got > 0 && status == 200) {
-            char *line = strchr(sdp, '\n');
-            if (line) {
-                *line = 0;
-                uint32_t id = (uint32_t)strtoul(sdp, NULL, 10);
-                if (id && id != last_offer_id) {
-                    submit_offer(line + 1, id);
-                    last_offer_id = id;
+        char url[NETWORK_SIGNALING_SIZE + sizeof(offer_url)];
+        // While a viewer is connected no new offer is needed, so avoid the
+        // expensive TLS handshake entirely. The peer closes on SCTP close or
+        // after 10 s without an ACK, which makes the condition true again.
+        if (!webrtc_video_active() && esp_timer_get_time() >= next_offer_at) {
+            snprintf(offer_url, sizeof(offer_url), "/api/esp/offer?seen=%"PRIu32, last_offer_id);
+            build_url(url, sizeof(url), offer_url);
+            int got = http_request(url, NULL, sdp, SDP_MAX, &status);
+            if (got > 0 && status == 200) {
+                char *line = strchr(sdp, '\n');
+                if (line) {
+                    *line = 0;
+                    uint32_t id = (uint32_t)strtoul(sdp, NULL, 10);
+                    if (id && id != last_offer_id) {
+                        submit_offer(line + 1, id);
+                        last_offer_id = id;
+                    }
                 }
             }
+            next_offer_at = esp_timer_get_time() + (int64_t)ret_delay(status) * 1000;
         }
 
         char *answer = NULL;
@@ -546,9 +568,8 @@ static void signaling_task(void *arg)
             }
             free(answer);
         }
-        // Once streaming, four new HTTP connections per second needlessly
-        // compete with DTLS/SCTP and Wi-Fi. Keep reconnect polling at 1 Hz.
-        vTaskDelay(pdMS_TO_TICKS(webrtc_video_active() ? 1000 : ret_delay(status)));
+        // Check for a pending answer promptly; offer polling is paced above.
+        vTaskDelay(pdMS_TO_TICKS(250));
     }
 }
 
@@ -562,8 +583,8 @@ void webrtc_start(void)
     if (stun_url[0]) ESP_LOGI(TAG, "ICE STUN server: %s", stun_url);
     else ESP_LOGW(TAG, "ICE STUN server disabled; using host candidates only");
     assert(xTaskCreatePinnedToCore(peer_task, "webrtc", 16384, NULL, 6, NULL, 1) == pdPASS);
-    if (CONFIG_WEBCAM_SIGNALING_URL[0]) {
-        ESP_LOGI(TAG, "Signaling server: %s", CONFIG_WEBCAM_SIGNALING_URL);
+    if (network_settings_active()->signaling_url[0]) {
+        ESP_LOGI(TAG, "Signaling server: %s", network_settings_active()->signaling_url);
         assert(xTaskCreatePinnedToCore(signaling_task, "signal", 8192, NULL, 5, NULL, 0) == pdPASS);
     } else {
         ESP_LOGW(TAG, "Signaling server disabled; WebRTC will not start");

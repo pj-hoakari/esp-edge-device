@@ -2,9 +2,14 @@ menu "ESP webcam"
 config WEBCAM_WIFI_SSID
     string "Wi-Fi SSID (local sdkconfig only)"
     default ""
+    help
+        Fallback when no serial network settings have been saved in NVS.
+        Use UART command wifi, then reboot, to configure without rebuilding.
 config WEBCAM_WIFI_PASSWORD
     string "Wi-Fi password (local sdkconfig only)"
     default ""
+    help
+        Fallback only. Saved UART network settings take precedence.
 config WEBCAM_CAMERA_FPS
     int "UVC capture FPS (10 or 15 for 1280x720)"
     range 6 30
@@ -35,11 +40,15 @@ config WEBCAM_SIGNALING_URL
     string "Node signaling server base URL (empty disables WebRTC)"
     default "http://192.168.137.1:8080"
     help
+        Saved UART network settings take precedence. Use the signaling
+        command, then reboot, to change the server without rebuilding.
         Base URL of the viewer-server at the repository root. The ESP polls
         this server for SDP offers and posts answers; the browser is served by
         the same server. Use an address the ESP can reach, for example the PC
-        hotspot gateway. The ESP's own HTTP server keeps only camera debug
-        endpoints. Leave empty to run the MJPEG diagnostics without WebRTC.
+        hotspot gateway. http:// defaults to port 8080 and https:// to 443.
+        HTTPS validates the server with the ESP-IDF CA bundle. The ESP's own
+        HTTP server keeps only camera debug endpoints. Leave empty to run the
+        MJPEG diagnostics without WebRTC.
 config WEBCAM_STUN_URL
     string "STUN server URL (empty disables)"
     default "stun:stun.l.google.com:19302"

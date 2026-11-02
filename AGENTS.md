@@ -105,6 +105,63 @@ UDP受信nowait版の180.368秒測定は平均6.825fps・固定5秒最低6.195fp
 同期間のUSB受信1,746枚は全数有効JPEG、送信エラー0・送信途中破棄5、自発リセット検出0。
 UVC受信停止時のstop/close/reopen監視と`stream_restarts`を追加したが、無応答注入試験は未実施。
 `esp_webcam/vendor/` の2リポジトリはsubmodule、`.tools/esp-idf` はGit除外のローカルSDK取得である。
+2026-11-02、UART0（115200bps）にネットワーク設定コマンドを追加した。
+`wifi`でSSID・パスワード、`signaling`でサーバーIPv4/ホスト名/HTTP URLを対話入力し、
+専用NVS名前空間`network`へ保存する。`show`で現在値・保存値を表示し、`reboot`で反映する。
+パスワード本文はエコー・表示しない。Wi-Fi未設定・未接続でも設定できる。
+保存値はmenuconfigより優先し、RTC調整値とは独立する。STUNは従来通りKconfigで設定する。
+実装は`main/network_settings.c`・`network_settings_values.c`・`serial_input.h`、操作手順はREADMEを参照。
+入力検証・シリアル行処理のPCテスト、受信・描画・中継13テスト、ESP-IDF v6.1のビルド・リンクに成功。
+appは1,262,080 bytes（0x134200）、アプリ領域18%空き。
+同日、ユーザー指示によりCOM3のPico debugprobe UART経由でESP32-S3 rev.0.2へ書き込み、
+bootloader・partition table・appのハッシュ照合に成功した。書き込み後はbootloaderで待機。
+実機での設定保存・再起動後の接続先変更は未検証。
+同日、UARTログで入力欄が流れる問題を修正し、設定画面ではログ表示を停止する。
+`logs on`で表示を再開し、Enterまたは任意の入力で停止して設定へ戻る。HTTP用ログ記録は継続する。
+コマンド・SSID・サーバー入力はエコーし、パスワードは`*`でマスクする（端末のローカルエコーはOFF）。
+`tests/test_network_console.py`で実コンソール処理のログ切替・CRLF・マスク・キャンセル・NVS再読込みが成功。
+修正版もESP-IDFビルド・リンク成功（app 1,262,816 bytes、0x1344e0、アプリ領域18%空き）。
+COM3経由で書き込み・全イメージのハッシュ照合後、IO0解除・ENリセットで通常起動。
+実機でログ停止中・再停止後の各3秒間のUART追加出力0バイト、`help`・ログ切替・Enter復帰・
+SSID入力表示・パスワードのマスク・Wi-Fi/サーバー入力のキャンセルを確認した。
+確認用入力は保存していない。COM3は確認後に解放済み。
+続く依頼で802.1X/EAPを追加。`eap`でTLS、PEAP/MSCHAPv2、TTLSのEAP/MSCHAPv2/MSCHAP/PAP/CHAPを選ぶ。
+WPA/WPA2/WPA3-Enterprise・Suite-B用設定、CA/サーバー名/期限の検証設定、`clock`を追加した。
+`protocols`はビルド時の対応方式、`credentials`は資材の保存有無を表示する。
+証明書・秘密鍵・PACは`tools/upload_wifi_credential.py`で転送し、`wifi_certs`へ保存する。
+SDKの制約でFASTはMbedTLS Wi-Fi TLSクライアントと両立しないため、`sdkconfig.fast.defaults`の別ビルド。
+通常版は`esp_webcam/build/`、FAST版はルート`build-fast/`。両方ビルド・リンク成功。
+appは通常版1,374,928 bytes（0x14fad0、10%空き）、FAST版1,357,040 bytes（0x14b4f0、12%空き）。
+設定blobはv2。v1の328バイトblobからSSID・PSK・シグナリングを保持して移行し、RTC調整は維持する。
+EAP設定・資材転送・移行・認証APIのPCテストと既存13テスト成功。802.1X実接続・映像性能は未確認。
+通常版はCOM3経由で書き込み・全イメージのハッシュ照合、IO0解除後の通常起動に成功。
+実機でEAP方式一覧・入力キャンセル・ログ停止、SDK公開サンプルCA/クライアント証明書/秘密鍵の
+解析・NVS保存・削除に成功した。サンプルは全削除し、接続プロファイルは変更していない。
+FAST版の実機書き込み・RADIUSでの認証は未実施。COM3は解放済み。
+詳細・SDK根拠・実機の検証状況は`docs/wifi-enterprise-20261102.md`を参照する。
+続くユーザー報告で802.1X Wi-Fiへの接続成功を確認（全EAP方式・検証設定の実証ではない）。
+現在IPを`show`に追加し、`ping [IPv4]`を追加。pingは3回・1秒間隔/応答待ち、宛先省略時はゲートウェイ。
+未接続時は古いIPを表示・使用しない。`check signaling`は状態を変えない`GET /ice`のHTTP応答を確認、
+`check stun`は設定済みSTUNへUDP Bindingを1回だけ送信し、要求IDに合う応答を検証する。
+ユーザー指定により、確認コマンドは疎通確認だけを行い、設定保存・SDP交換・ICE/WebRTC接続を開始しない。
+実装は`main/network_diagnostics.c`・`network_probes.c`・`stun_probe.h`。
+IP/ping・疎通専用API・異常応答のPCテストと、`GET /ice`の状態不変を含む14テストが成功した。
+診断版の通常ビルド成功（app 1,382,560 bytes、0x1518a0、アプリ領域10%空き）。
+FAST互換版もビルド成功（app 1,364,720 bytes、0x14d2f0、アプリ領域11%空き）。
+診断版の通常版はCOM3経由でESP32-S3へ書き込み、全イメージのハッシュ一致を確認済み。
+NVSの設定・証明書は保持し、書き込み後はbootloaderで待機。IO0解除・ENリセットが必要。
+診断版の通常起動後のIP表示・疎通結果は実機未確認。
+2026-11-02、シグナリングをCloudflare TunnelのHTTPSへ接続できるようにした。
+`https://host`は443を補完し、裸ホストは`http://host:8080`のまま。パス・クエリ・
+ユーザー情報・IPv6は拒否する。CAはesp_crt_bundleを使用し、Cloudflareの
+`WE1`→`GTS Root R4`（GlobalSign Root CAによるクロス署名）を検証するため
+`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY`と
+`CONFIG_MBEDTLS_X509_TRUSTED_CERT_CALLBACK`を有効にした。`check signaling`は
+`status=200`で成功。映像接続中はofferポーリングを停止し、DataChannel切断または
+10秒ACK途絶で再開する。実機の`/rtc-status`で`channel_open:true`、送信6.394fps、
+描画6.394fps、送信エラー0、破棄5を確認した。診断用の相手IP表示は実装後に撤去し、
+書き込んでいない。`viewer-server/tools/benchmark-browser.mjs`は`VIEWER_URL`で
+Tunnel先を指定できる。appは1,383,056 bytes（0x151a90、アプリ領域10%空き）。
 作業開始時に実際の構成を確認し、構成変更に合わせてこの文書を更新する。
 
 ## 作業の進め方

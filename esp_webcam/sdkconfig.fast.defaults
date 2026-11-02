@@ -1,0 +1,4 @@
+# Alternate Wi-Fi TLS backend required by the SDK for EAP-FAST.
+# WebRTC DTLS continues to use MbedTLS; only the Wi-Fi EAP client changes.
+CONFIG_ESP_WIFI_MBEDTLS_TLS_CLIENT=n
+CONFIG_ESP_WIFI_SUITE_B_192=n

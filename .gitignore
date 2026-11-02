@@ -3,6 +3,7 @@ _autosave*
 production/
 *-backups
 esp_webcam/.tools/
+/build-fast/
 viewer-server/last-offer.sdp
 viewer-server/node_modules/
 .DS_Store

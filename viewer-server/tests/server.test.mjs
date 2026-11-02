@@ -58,6 +58,21 @@ test('a new viewer offer invalidates the previous answer', async t => {
   assert.equal((await fetch(`${base}/api/esp/answer?id=${first}`, { method: 'POST', body: answer })).status, 409);
 });
 
+test('connectivity GET /ice preserves the session and ESP polling state', async t => {
+  const server = createSignalingServer({ stunUrls: ['stun:example.test:3478'] });
+  const base = await listen(server);
+  t.after(() => server.close());
+  const id = Number(await (await fetch(`${base}/api/offer`, { method: 'POST', body: offer })).text());
+  await fetch(`${base}/api/esp/answer?id=${id}`, { method: 'POST', body: answer });
+  for (let i = 0; i < 3; i++) assert.equal((await fetch(`${base}/ice`)).status, 200);
+  const status = await (await fetch(`${base}/api/status`)).json();
+  assert.equal(status.offer_id, id);
+  assert.equal(status.has_answer, true);
+  assert.equal(status.esp_seen_id, 0);
+  assert.equal(status.esp_last_poll_ms_ago, -1);
+  assert.equal(await (await fetch(`${base}/api/answer?id=${id}`)).text(), answer);
+});
+
 test('mDNS host candidates keep the a=candidate prefix', () => {
   const sdp = 'a=candidate:1 1 udp 100 abc-123.local 5000 typ host generation 0\n';
   const out = expandLocalCandidates(sdp, '192.168.137.1');
