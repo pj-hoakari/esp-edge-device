@@ -58,7 +58,7 @@ esp-usbとesp-webrtc-solutionはsubmoduleとしてコミットを固定してい
 最新ソースは6fps以上の常時維持を目標にした送信高速化版。JPEG構造検査とEOI後の
 整列データ除去、位相を維持する10fpsペーシング、最大4断片/4msのバースト送信、
 送信満杯時のパケット再利用、CRC32計算撤去、ACK非ゲート化を実装した。
-DataChannel再送0（Kconfig 0〜3）、ESP側生成チャンネル、AES-GCM優先、CPU1配置、
+DataChannel再送0（Kconfig 0〜3）、ESP側生成チャンネル、ChaCha20-Poly1305優先、CPU1配置、
 独立フレーム購読、ソケット上限20を維持する。解像度はHD 1280×720固定。
 ブラウザは3フレーム分の断片順序入れ替えに対応し、デコード待ちは最新1枚だけ保持する。
 動き検出の画像読み戻しを撤去し、実際にcanvasへ描いたフレームだけACKする。
@@ -81,10 +81,29 @@ JPEG解析の同一CコードをMSVCでPC実行するテスト（末尾0〜16バ
 開通しなかった原因は2つ。`peer_task`のフレーム開始分岐で`size = n;`が抜けてJPEGを
 一度も送っていなかったこと、Nodeサーバーの候補展開が`a=candidate:`を落とし
 `.local`を`127.0.0.1`へ置換していたこと。両方修正済み。
-2026-11-01版はユーザーの手元に実機がなく、実機書き込み・実測6fps以上の維持・長時間性能は未検証。
+2026-11-01版は当初実機不在だったが、同日にCOM3のPico debugprobe UART経由で
+ESP32-S3 rev.0.2へ書き込み、bootloader・partition table・appのハッシュ照合に成功した。
+WindowsのCDC UARTではDTR有効とタイムアウト変更時のUART再設定回避が必要だった。
+再現用の`esp_webcam/tools/flash_debugprobe.py`は生成済みbuildを書き込み、`--check`で接続のみ確認する。
+Pico GP4→ESP GPIO44/RXD0、GP5←GPIO43/TXD0、GND共通。書き込み時はIO0=GNDでENリセット、
+書き込み後はIO0のGND接続を外してENリセットする。通常起動、Wi-Fi接続（今回のDHCPは
+192.168.137.145）、720p MJPEG受信10fps、診断API応答、WebRTC開通を確認済み。
+30.048秒の測定で送信208枚・描画ACK208枚（平均6.922fps）。5秒区間の最低は5.206fpsで、
+期間中の送信エラー・送信途中破棄0。常時6fps以上の要件は未達、長時間性能は未検証。
 同版はESP-IDF v6.1 / ESP32-S3でビルド・リンク成功（app 1,161,584 bytes、0x11b970、
 アプリ領域24%空き）。最終ELFで高速UDPフックの強いシンボルへの置換を確認済み。
 受信・描画・中継の13テストとC送信周期／UDPバックプレッシャーのテストが成功した。
+同日、UARTとHTTPで実機の処理時間を測る`/perf`と、実験設定をNVSへ保存できる
+`POST /rtc-config`を追加した。近いJPEGサイズでAES-GCM平均6.51fpsに対し
+ChaCha20-Poly1305平均6.98fpsだったため、ChaCha20優先・AES-GCMフォールバックを採用。
+暗号ライブラリの末尾に-O3を適用し、4断片/4msでChrome実デコード・canvas描画を
+180.326秒測った結果は平均6.738fps、最低5秒区間6.165fps。大バーストは採用しない。
+全被写体・電波条件での常時6fps維持は未保証。計測器・処理時間・制約は
+`docs/webrtc-profile-20261101.md`、再現ツールは`viewer-server/tools/benchmark-browser.mjs`。
+UDP受信nowait版の180.368秒測定は平均6.825fps・固定5秒最低6.195fpsだったが、
+ローリング5秒では最低5.4fps、最大描画間隔617msがあり、常時維持の要件は未達。
+同期間のUSB受信1,746枚は全数有効JPEG、送信エラー0・送信途中破棄5、自発リセット検出0。
+UVC受信停止時のstop/close/reopen監視と`stream_restarts`を追加したが、無応答注入試験は未実施。
 `esp_webcam/vendor/` の2リポジトリはsubmodule、`.tools/esp-idf` はGit除外のローカルSDK取得である。
 作業開始時に実際の構成を確認し、構成変更に合わせてこの文書を更新する。
 

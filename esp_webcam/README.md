@@ -27,9 +27,9 @@ ICEはSTUNでサーバー再帰候補を集める。シグナリングはHTTPポ
   デコード待ちは最新1枚のみ保持する。ACKは実際にcanvasへ描画したフレームだけ返す。
 - 速度優先コンパイル、lwIP IRAM配置、受信mailbox拡大、Wi-Fi TXバッファ48・BA窓12を設定。
   `/rtc-status`の`send_fps`・`display_fps`は直近約5秒の実測カウンタ差分、
-  `effective_fps`は設定値。実機不在のため6fps以上の達成は未検証。
+  `effective_fps`は設定値。実機測定の最新結果は下記のプロファイル記録を参照。
   詳細とメモリ負担は[高速化メモ](../docs/webrtc-performance-20261101.md)を参照。
-- AES-128-GCM優先、WebRTCタスクをCPU1へ配置、SCTP送信キャッシュ128KiB、
+- 実機比較によりChaCha20-Poly1305優先（AES-GCMへフォールバック）、WebRTCタスクをCPU1へ配置、SCTP送信キャッシュ128KiB、
   HTTP/ICE併用のためソケット上限20。再圧縮はまだ追加していない。
 - 直接LAN接続では、`.local`ホスト候補を到達可能なIPv4へ展開する。ビューアーをlocalhostで
   開いた場合はESPと同一サブネットのPC側IPv4を使う。`a=candidate:`行の接頭辞は保持する。
@@ -48,7 +48,62 @@ libwebrtc M106ベースの`@roamhq/wrtc` 0.10.0による検証クライアント
 appは1,161,584 bytes（0x11b970）、アプリ領域24%空き。
 最終ELFの`udp_socket_sendto`が独自の強いシンボル（`T`）であることも確認した。
 受信・描画・中継テスト13件と、実コードのC送信周期／UDP再試行テストが成功した。
-実機不在のため、今回の変更を含むファームウェアの実測fpsと長時間動作は未検証。
+この時点では実機不在だった。後述の同日実機確認・30秒測定を実施したが、長時間動作は未検証。
+
+同日追記：COM3の`Debugprobe on Pico (CMSIS-DAP)`のUART経由で、
+ESP32-S3 rev.0.2へ上記1,161,584-byte版を書き込み、bootloader・partition table・appの
+ハッシュ照合に成功した。WindowsではDTR有効が必要で、esptoolの読み取りタイムアウト変更に
+伴うCDC UART再設定時に同期応答が破損した。物理ポートのタイムアウトを固定し、
+ソフト側で読み取り期限を管理する`tools/flash_debugprobe.py`で接続・書き込みに成功した。
+IO0のGND保持解除後のENリセットで通常起動、Wi-Fi接続（今回のDHCP IPは
+`192.168.137.145`）、1280×720 MJPEG受信10fps開始、診断API・WebRTC開通を確認した。
+診断時は受信633枚すべて有効JPEG、USB転送エラー0・バッファ超過0だった。
+その後30.048秒間のカウンタ差分では送信208枚・描画ACK208枚、平均6.922fps。
+約5秒ごとの描画ACK fpsは7.715 / 7.792 / 7.582 / 7.830 / 5.206 / 5.400。
+期間中の送信エラー・送信途中破棄は0、DataChannelは開通を維持したが、
+**5秒区間で6fpsを下回り、常時6fps以上の要件は未達**。長時間性能も未確認。
+このfpsはブラウザのcanvas描画後ACKをESPで数えた値で、物理ディスプレイの走査の測定ではない。
+
+Picoの標準debugprobe UARTはGP4=TX→ESP GPIO44/RXD0、GP5=RX←ESP GPIO43/TXD0、GND共通。
+IO0をGNDに保持してENリセット後、ESP-IDFのPython環境で次を実行する。
+
+```powershell
+python tools/flash_debugprobe.py --port COM3 --check
+python tools/flash_debugprobe.py --port COM3
+```
+
+既存`build/`のイメージを使用するため、ソース変更後は先に`idf.py build`を行う。
+書き込み後はIO0のGND接続を外してENリセットする。補助ツールはeFuseを変更しない。
+
+同日追加の実機プロファイルでは、近いJPEGサイズでAES-GCMが平均6.51fps、
+ChaCha20-Poly1305が平均6.98fpsだった。暗号ライブラリへ明示的に速度優先の`-O3`を適用し、
+4断片/4msの設定で3分測定した結果は平均6.74fps、最低5秒区間6.16fps。
+大きなバーストは速度が上がらず内部RAMの余裕を減らしたため採用しない。
+この条件での測定結果であり、全被写体・電波条件での6fps維持を保証するものではない。
+続くUDP受信nowait版の3分測定は平均6.82fps・固定5秒の最低6.20fpsだったが、
+ローリング5秒では最低5.4fps、最大描画間隔617msがあり、常時6fpsの要件は未達。
+詳細・処理別の時間・実験設定は[実機プロファイル](../docs/webrtc-profile-20261101.md)に記載した。
+
+`/perf`で実際の暗号方式・CPU周波数・FW SHA・内部RAM・TLS/UDP/送信処理時間を取得できる。
+`POST /rtc-config?cipher=2&chunks=4&burst_us=4000&fast_rx=1`で比較設定を変更し、
+`&persist=1`でNVSへ保存する。暗号変更は次の接続から反映する。
+`/rtc-status`は`cipher_pref`・`burst_chunks`・`burst_us`・`fast_rx`・`tuning_saved`も返す。
+UVCの受信停止監視を追加し、復旧試行数を`/status`の`stream_restarts`へ出す。
+
+製品と同じ受信コードで実デコード・canvas描画を測るWindows用Chrome測定ツールを追加した。
+viewer-serverを起動し、リポジトリ直下から実行する。
+
+```powershell
+$env:ESP_URL='http://192.168.137.145'
+$env:SECONDS='180'
+$env:RESULT_FILE='esp_webcam/.tools/benchmark.json'
+node viewer-server/tools/benchmark-browser.mjs
+```
+
+UARTログはESP-IDFのPythonから
+`python esp_webcam/tools/monitor_debugprobe.py --port COM3 --seconds 60 --output esp_webcam/.tools/uart.log`
+で取得する。DTRを有効に保ち、ローカルsdkconfigのWi-Fi認証情報を伏せて保存する。
+フラッシュとログ監視でCOM3を同時に開かない。
 
 ## 現在の動作：HTTP MJPEGとカメラ診断
 
@@ -67,7 +122,7 @@ VID:PID=349C:3307は引き継ぐ（fpsはKconfigで変更可能、解像度はHD
 `/status`はUSB機器数、UVC検出回数、オープン結果、JPEG受信件数・寸法・サイズ・受信fps・
 送信目標fps・動きしきい値、不正JPEGの理由別カウンタ、バッファ超過・転送エラーを返す。
 `/rtc-status`はDataChannel接続、送信数、重複排除・stale破棄・ACK統計に加え、
-`effective_fps`（現在の実効送信fps）、`client_motion`（直近の動きスコア）を返す。
+`effective_fps`（送信目標fps）、`client_motion`（旧動き検出の互換フィールド、現在-1）を返す。
 USB機器数とUVC検出は別の段階である。
 UVC検出回数は起動後の累計なので、現在接続されているかはUSB機器数・状態・最終受信時刻も見る。
 MJPEG用と画面・診断用にHTTPサーバーを分け、配信中も診断を取得できる。

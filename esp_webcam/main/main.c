@@ -18,6 +18,8 @@
 #include "camera.h"
 #include "webrtc.h"
 #include "sender_policy.h"
+#include "perf.h"
+#include "nvs.h"
 
 /* All peer APIs are called by peer_task; callbacks execute in that task too. */
 static const char *TAG = "webcam";
@@ -37,6 +39,12 @@ static bool ack_pending;
 static int64_t ack_since;
 static atomic_int client_motion = -1;
 static atomic_int effective_fps = CONFIG_WEBCAM_TARGET_FPS;
+// Real-device HD benchmarks were faster with ChaCha20 than hardware AES-GCM.
+static atomic_int cipher_pref = ESP_PEER_DTLS_CIPHER_CHACHA;
+static atomic_int burst_chunks = SENDER_BURST_CHUNKS;
+static atomic_int burst_time_us = SENDER_BURST_US;
+static atomic_bool tuning_saved;
+static atomic_bool fast_rx = true;
 static char stun_url[] = CONFIG_WEBCAM_STUN_URL;
 static esp_peer_ice_server_cfg_t ice_server = {.stun_url = stun_url};
 typedef struct { char *sdp; uint32_t id; } command_t;
@@ -79,6 +87,47 @@ static void stats_reset(void)
 
 bool webrtc_video_active(void) { return atomic_load(&channel_open); }
 
+bool webrtc_fast_rx(void) { return atomic_load(&fast_rx); }
+
+bool webrtc_configure(int cipher, unsigned chunks, unsigned burst_us, bool poll)
+{
+    if (cipher < 0 || cipher > 2 || chunks < 1 || chunks > 16 || burst_us < 1000 || burst_us > 64000)
+        return false;
+    atomic_store(&cipher_pref, cipher);
+    atomic_store(&burst_chunks, chunks);
+    atomic_store(&burst_time_us, burst_us);
+    atomic_store(&fast_rx, poll);
+    atomic_store(&tuning_saved, false);
+    return true;
+}
+
+bool webrtc_save_tuning(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open("rtc_tuning", NVS_READWRITE, &handle) != ESP_OK) return false;
+    esp_err_t err = nvs_set_u8(handle, "cipher", atomic_load(&cipher_pref));
+    if (err == ESP_OK) err = nvs_set_u8(handle, "chunks", atomic_load(&burst_chunks));
+    if (err == ESP_OK) err = nvs_set_u16(handle, "burst_us", atomic_load(&burst_time_us));
+    if (err == ESP_OK) err = nvs_set_u8(handle, "fast_rx", atomic_load(&fast_rx));
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    atomic_store(&tuning_saved, err == ESP_OK);
+    return err == ESP_OK;
+}
+
+static void load_tuning(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open("rtc_tuning", NVS_READONLY, &handle) != ESP_OK) return;
+    uint8_t cipher, chunks, poll = 1; uint16_t us;
+    bool found = nvs_get_u8(handle, "cipher", &cipher) == ESP_OK &&
+        nvs_get_u8(handle, "chunks", &chunks) == ESP_OK &&
+        nvs_get_u16(handle, "burst_us", &us) == ESP_OK;
+    nvs_get_u8(handle, "fast_rx", &poll);
+    nvs_close(handle);
+    if (found && webrtc_configure(cipher, chunks, us, poll != 0)) atomic_store(&tuning_saved, true);
+}
+
 int webrtc_status_json(char *out, size_t size)
 {
     sender_stats_t s;
@@ -94,7 +143,8 @@ int webrtc_status_json(char *out, size_t size)
         "\"acked_frames\":%"PRIu32",\"no_ack\":%"PRIu32","
         "\"last_ack_rtt_ms\":%"PRIu32",\"ack_pending\":%s,"
         "\"would_block\":%"PRIu32",\"max_send_ms\":%"PRIu32","
-        "\"mean_send_ms\":%"PRIu64",\"send_fps\":%.3f,\"display_fps\":%.3f}",
+        "\"mean_send_ms\":%"PRIu64",\"send_fps\":%.3f,\"display_fps\":%.3f,"
+        "\"cipher_pref\":%d,\"burst_chunks\":%d,\"burst_us\":%d,\"fast_rx\":%s,\"tuning_saved\":%s}",
         peer_state, atomic_load(&channel_open) ? "true" : "false", stream_id,
         frame_id, atomic_load(&effective_fps), atomic_load(&client_motion),
         s.sent_frames, s.sent_bytes, s.send_errors, s.dropped_frames,
@@ -102,7 +152,10 @@ int webrtc_status_json(char *out, size_t size)
         s.last_ack_rtt_ms, ack_pending ? "true" : "false",
         s.would_block, s.max_send_ms,
         s.sent_frames ? s.send_time_us / s.sent_frames / 1000 : 0,
-        s.send_fps_milli / 1000.0, s.display_fps_milli / 1000.0);
+        s.send_fps_milli / 1000.0, s.display_fps_milli / 1000.0,
+        atomic_load(&cipher_pref), atomic_load(&burst_chunks), atomic_load(&burst_time_us),
+        webrtc_fast_rx() ? "true" : "false",
+        atomic_load(&tuning_saved) ? "true" : "false");
 }
 
 static int on_msg(esp_peer_msg_t *msg, void *ctx)
@@ -195,6 +248,7 @@ static int on_data(esp_peer_data_frame_t *f, void *ctx)
 
 static int open_peer(void)
 {
+    esp_peer_set_dtls_cipher_pref(atomic_load(&cipher_pref));
     esp_peer_default_cfg_t extra = {
         .agent_recv_timeout = 1,
         .keep_role = true,
@@ -239,6 +293,7 @@ static void peer_task(void *arg)
             atomic_store(&client_motion, -1);
             atomic_store(&effective_fps, CONFIG_WEBCAM_TARGET_FPS);
             stats_reset();
+            perf_reset();
             sampled_sent = 0; sampled_acked = 0; last_log = esp_timer_get_time();
             xSemaphoreTake(answer_lock, portMAX_DELAY);
             free(pending_answer);
@@ -255,7 +310,11 @@ static void peer_task(void *arg)
             }
             free(cmd.sdp);
         }
-        if (peer) esp_peer_main_loop(peer);
+        if (peer) {
+            int64_t before = esp_timer_get_time();
+            esp_peer_main_loop(peer);
+            perf_record(PERF_PEER_LOOP, esp_timer_get_time() - before, 0, 0);
+        }
         int64_t now = esp_timer_get_time();
         if (ack_pending && now - ack_since > 2000000) {
             ack_pending = false;
@@ -275,7 +334,9 @@ static void peer_task(void *arg)
         // the capture pipeline.
         if (channel_open && !size && now >= next_frame) {
             camera_frame_info_t got = info;
+            int64_t before = esp_timer_get_time();
             size_t n = camera_read_frame(frame, &got);
+            perf_record(PERF_COPY, esp_timer_get_time() - before, n, 0);
             info = got;
             bool stale = n && got.captured_us && now - got.captured_us > budget_us;
             if (!n) {
@@ -298,9 +359,9 @@ static void peer_task(void *arg)
         // Amortize the event-loop receive timeout and task delay across up to
         // four chunks. Bound each burst so ACK/SACK/ICE processing still runs.
         int64_t burst_start = esp_timer_get_time();
-        for (int chunk = 0; size && chunk < SENDER_BURST_CHUNKS; chunk++) {
+        for (int chunk = 0; size && chunk < atomic_load(&burst_chunks); chunk++) {
             now = esp_timer_get_time();
-            if (now - burst_start >= SENDER_BURST_US) break;
+            if (now - burst_start >= atomic_load(&burst_time_us)) break;
             if (now - send_since > budget_us) {
                 stats_bump(&stats.dropped_frames);
                 size = 0; next_frame = now;
@@ -317,7 +378,9 @@ static void peer_task(void *arg)
             }
             esp_peer_data_frame_t data = {.type = ESP_PEER_DATA_CHANNEL_DATA,
                 .stream_id = stream_id, .data = packet, .size = packet_size};
+            int64_t before = esp_timer_get_time();
             int ret = esp_peer_send_data(peer, &data);
+            perf_record(PERF_SEND, esp_timer_get_time() - before, ret ? 0 : data.size, ret);
             if (!ret) {
                 offset += n;
                 packet_size = 0;
@@ -491,10 +554,11 @@ static void signaling_task(void *arg)
 
 void webrtc_start(void)
 {
+    load_tuning();
     commands = xQueueCreate(2, sizeof(command_t));
     answer_lock = xSemaphoreCreateMutex();
     assert(commands && answer_lock);
-    esp_peer_set_dtls_cipher_pref(ESP_PEER_DTLS_CIPHER_AES_GCM);
+    esp_peer_set_dtls_cipher_pref(atomic_load(&cipher_pref));
     if (stun_url[0]) ESP_LOGI(TAG, "ICE STUN server: %s", stun_url);
     else ESP_LOGW(TAG, "ICE STUN server disabled; using host candidates only");
     assert(xTaskCreatePinnedToCore(peer_task, "webrtc", 16384, NULL, 6, NULL, 1) == pdPASS);

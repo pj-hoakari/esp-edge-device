@@ -11,6 +11,16 @@ set(EXTRA_COMPONENT_DIRS
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(esp_webcam)
 
+# IDF 6.1's Mbed TLS/TF-PSA targets append -Os even in a performance build.
+# Apply the speed option last, including the separate built-in crypto target.
+if(CONFIG_COMPILER_OPTIMIZATION_PERF)
+    foreach(crypto_target mbedtls mbedx509 tfpsacrypto builtin)
+        if(TARGET ${crypto_target})
+            target_compile_options(${crypto_target} PRIVATE -O3)
+        endif()
+    endforeach()
+endif()
+
 # esp_peer 1.5.7 builds a raw '-L <path>' string, which splits paths containing
 # spaces at the final link. Keep vendor sources intact and let CMake quote it.
 idf_component_get_property(peer_lib esp_peer COMPONENT_LIB)

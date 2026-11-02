@@ -18,6 +18,7 @@
 #include "usb/usb_host.h"
 #include "camera.h"
 #include "webrtc.h"
+#include "perf.h"
 
 static const char *TAG = "mjpeg";
 extern const char page_start[] asm("_binary_mjpeg_html_start");
@@ -134,7 +135,7 @@ static esp_err_t diagnostics(httpd_req_t *req)
         "\"invalid_no_soi\":%"PRIu32",\"invalid_marker\":%"PRIu32","
         "\"invalid_truncated\":%"PRIu32",\"invalid_no_sof\":%"PRIu32","
         "\"invalid_dimensions\":%"PRIu32",\"invalid_no_sos\":%"PRIu32","
-        "\"invalid_no_eoi\":%"PRIu32",\"copy_drops\":%"PRIu32"}",
+        "\"invalid_no_eoi\":%"PRIu32",\"copy_drops\":%"PRIu32",\"stream_restarts\":%"PRIu32"}",
         states[s.state], devices, list_error, s.uvc_detections, s.open_attempts,
         s.frames_received, s.valid_jpegs, s.invalid_jpegs, s.oversized_jpegs,
         s.buffer_overflows, s.transfer_errors, s.last_frame_bytes, s.width, s.height,
@@ -146,7 +147,7 @@ static esp_err_t diagnostics(httpd_req_t *req)
         CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE, fifo_bias,
         s.trimmed_jpegs, s.trimmed_bytes, s.missing_soi, s.missing_eoi,
         s.invalid_no_soi, s.invalid_marker, s.invalid_truncated, s.invalid_no_sof,
-        s.invalid_dimensions, s.invalid_no_sos, s.invalid_no_eoi, s.copy_drops);
+        s.invalid_dimensions, s.invalid_no_sos, s.invalid_no_eoi, s.copy_drops, s.stream_restarts);
     if (len < 0 || len >= sizeof(json))
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Status buffer too small");
     httpd_resp_set_type(req, "application/json");
@@ -156,13 +157,50 @@ static esp_err_t diagnostics(httpd_req_t *req)
 
 static esp_err_t rtc_status(httpd_req_t *req)
 {
-    char json[1024];
+    char json[1536];
     int len = webrtc_status_json(json, sizeof(json));
     if (len < 0 || len >= sizeof(json))
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "RTC status buffer too small");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, json, len);
+}
+
+static esp_err_t performance_status(httpd_req_t *req)
+{
+    char json[2304];
+    int len = perf_json(json, sizeof(json));
+    if (len < 0) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Performance buffer too small");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, json, len);
+}
+
+static esp_err_t configure_rtc(httpd_req_t *req)
+{
+    char query[128], cipher[12], chunks[12], budget[12];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "cipher", cipher, sizeof(cipher)) != ESP_OK ||
+        httpd_query_key_value(query, "chunks", chunks, sizeof(chunks)) != ESP_OK ||
+        httpd_query_key_value(query, "burst_us", budget, sizeof(budget)) != ESP_OK)
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Need cipher, chunks and burst_us");
+    char *end1, *end2, *end3;
+    long c = strtol(cipher, &end1, 10), n = strtol(chunks, &end2, 10), us = strtol(budget, &end3, 10);
+    char poll[8];
+    bool fast_rx = webrtc_fast_rx();
+    if (httpd_query_key_value(query, "fast_rx", poll, sizeof(poll)) == ESP_OK) {
+        if (strcmp(poll, "0") && strcmp(poll, "1"))
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid fast_rx");
+        fast_rx = strcmp(poll, "1") == 0;
+    }
+    if (end1 == cipher || *end1 || end2 == chunks || *end2 || end3 == budget || *end3 ||
+        c < 0 || c > 2 || n < 1 || n > 16 || us < 1000 || us > 64000 || !webrtc_configure(c, n, us, fast_rx))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid RTC tuning");
+    char persist[8];
+    if (httpd_query_key_value(query, "persist", persist, sizeof(persist)) == ESP_OK &&
+        strcmp(persist, "1") == 0 && !webrtc_save_tuning())
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not save RTC tuning");
+    return rtc_status(req);
 }
 
 static esp_err_t stream(httpd_req_t *req)
@@ -214,11 +252,15 @@ static void start_servers(void)
     const httpd_uri_t log_uri = {.uri = "/usb-log", .method = HTTP_GET, .handler = usb_log_page};
     const httpd_uri_t rtc_uri = {.uri = "/rtc-status", .method = HTTP_GET, .handler = rtc_status};
     const httpd_uri_t rtc_log_uri = {.uri = "/log", .method = HTTP_GET, .handler = rtc_log_page};
+    const httpd_uri_t perf_uri = {.uri = "/perf", .method = HTTP_GET, .handler = performance_status};
+    const httpd_uri_t config_uri = {.uri = "/rtc-config", .method = HTTP_POST, .handler = configure_rtc};
     ESP_ERROR_CHECK(httpd_register_uri_handler(control, &home));
     ESP_ERROR_CHECK(httpd_register_uri_handler(control, &status));
     ESP_ERROR_CHECK(httpd_register_uri_handler(control, &log_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(control, &rtc_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(control, &rtc_log_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(control, &perf_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(control, &config_uri));
     // A separate server keeps /status responsive during a long-running stream.
     cfg.server_port = 81;
     cfg.ctrl_port++;

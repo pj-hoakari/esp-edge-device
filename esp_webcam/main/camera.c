@@ -194,8 +194,38 @@ static void camera_task(void *arg)
                 ESP_LOGI(TAG, "%dx%d MJPEG capture started at %d FPS",
                          CAMERA_WIDTH, CAMERA_HEIGHT,
                          CONFIG_WEBCAM_CAMERA_FPS);
-                xSemaphoreTake(unplugged, portMAX_DELAY);
-                ESP_ERROR_CHECK(uvc_host_stream_close(stream));
+                int64_t started = esp_timer_get_time();
+                int64_t progress_at = started;
+                camera_status_t snapshot;
+                camera_get_status(&snapshot);
+                uint32_t received = snapshot.frames_received;
+                while (xSemaphoreTake(unplugged, pdMS_TO_TICKS(500)) != pdTRUE) {
+                    camera_get_status(&snapshot);
+                    int64_t now = esp_timer_get_time();
+                    if (snapshot.frames_received != received) {
+                        received = snapshot.frames_received;
+                        progress_at = now;
+                    }
+                    int64_t valid_at = snapshot.last_valid_us > started ? snapshot.last_valid_us : started;
+                    if (now - progress_at > 3000000 || now - valid_at > 5000000) {
+                        ESP_LOGW(TAG, "UVC stalled; restarting stream (no frame %lld ms, no JPEG %lld ms)",
+                                 (long long)((now-progress_at)/1000), (long long)((now-valid_at)/1000));
+                        portENTER_CRITICAL(&status_mux);
+                        status.stream_restarts++;
+                        status.state = CAMERA_ERROR;
+                        portEXIT_CRITICAL(&status_mux);
+                        // BULK stop halts/flushes/clears the endpoint before reopening.
+                        uvc_host_stream_stop(stream);
+                        break;
+                    }
+                }
+                while ((err = uvc_host_stream_close(stream)) != ESP_OK) {
+                    ESP_LOGE(TAG, "UVC close failed: %s; retrying", esp_err_to_name(err));
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                }
+                xSemaphoreTake(lock, portMAX_DELAY);
+                latest_size = 0;
+                xSemaphoreGive(lock);
             } else {
                 portENTER_CRITICAL(&status_mux);
                 status.state = CAMERA_ERROR;

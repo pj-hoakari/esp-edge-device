@@ -34,6 +34,7 @@ typedef struct {
     uint32_t trimmed_jpegs, trimmed_bytes, missing_soi, missing_eoi;
     uint32_t invalid_no_soi, invalid_marker, invalid_truncated, invalid_no_sof;
     uint32_t invalid_dimensions, invalid_no_sos, invalid_no_eoi, copy_drops;
+    uint32_t stream_restarts;
     uint32_t last_frame_bytes;
     unsigned width, height;
     esp_err_t last_open_error;
