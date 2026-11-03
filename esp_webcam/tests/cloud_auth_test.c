@@ -5,9 +5,11 @@
 #include <time.h>
 
 #include "cJSON.h"
+#include "../main/cloud_auth_logic.h"
 #include "../main/cloud_settings.h"
 #include "../main/cloud_settings_values.h"
 #include "../main/device_auth_values.h"
+#include "../main/firebase_client.h"
 
 static const char *const EDGE = "0123456789abcdef";
 
@@ -272,6 +274,55 @@ static void state_checks(void)
     assert(!settings.device_code[0] && !settings.device_code_expires_at);
 }
 
+static void session_logic_checks(void)
+{
+    cloud_settings_t settings = {0};
+    firebase_session_t session = {0};
+    settings.event_access_obtained_at = 1000;
+    settings.event_access_expires_at = 1600;
+    strcpy(session.id_token, "id");
+    strcpy(session.refresh_token, "refresh");
+    session.id_token_expires_at = 2000;
+    session.event_access_obtained_at = 1000;
+    session.event_access_expires_at = 1600;
+
+    assert(!cloud_event_access_rotated(&session, &settings));
+    assert(cloud_session_next_action(&session, &settings, 1500) == CLOUD_SESSION_USE);
+    assert(cloud_session_next_action(&session, &settings, 1990) == CLOUD_SESSION_REFRESH);
+
+    settings.event_access_obtained_at = 1300;
+    settings.event_access_expires_at = 1900;
+    assert(cloud_event_access_rotated(&session, &settings));
+    assert(cloud_session_next_action(&session, &settings, 1500) == CLOUD_SESSION_REISSUE);
+    assert(cloud_session_next_action(&session, &settings, 1990) == CLOUD_SESSION_REISSUE);
+
+    settings.event_access_expires_at = 1600;
+    assert(cloud_event_access_rotated(&session, &settings));
+    assert(cloud_session_next_action(&session, &settings, 1990) == CLOUD_SESSION_REISSUE);
+
+    settings.event_access_obtained_at = 1000;
+    assert(!cloud_event_access_rotated(&session, &settings));
+    assert(cloud_session_next_action(&session, &settings, 1990) == CLOUD_SESSION_REFRESH);
+
+    session.refresh_token[0] = 0;
+    assert(cloud_session_next_action(&session, &settings, 1990) == CLOUD_SESSION_REISSUE);
+    assert(cloud_session_next_action(&session, &settings, 0) == CLOUD_SESSION_USE);
+
+    session.id_token[0] = 0;
+    assert(cloud_session_next_action(&session, &settings, 1500) == CLOUD_SESSION_REISSUE);
+
+    assert(cloud_firestore_auth_failed(401));
+    assert(cloud_firestore_auth_failed(403));
+    assert(!cloud_firestore_auth_failed(200));
+    assert(!cloud_firestore_auth_failed(500));
+
+    strcpy(session.id_token, "id");
+    session.id_token_expires_at = 2000;
+    assert(cloud_session_next_action(&session, &settings, 1500) == CLOUD_SESSION_USE);
+    session.id_token[0] = 0;
+    assert(cloud_session_next_action(&session, &settings, 1500) == CLOUD_SESSION_REISSUE);
+}
+
 int main(void)
 {
     url_checks();
@@ -279,6 +330,7 @@ int main(void)
     token_checks();
     device_response_checks();
     state_checks();
+    session_logic_checks();
     puts("cloud settings, device authorization, and token tests passed");
     return 0;
 }

@@ -262,7 +262,7 @@ Device Authorization とクラウド設定のPCテストは次のとおり。
 cc -std=c11 -Wall -Wextra -Werror -I esp_webcam/main \
   -I esp_webcam/managed_components/espressif__cjson/cJSON \
   esp_webcam/tests/cloud_auth_test.c esp_webcam/main/cloud_settings_values.c \
-  esp_webcam/main/device_auth_values.c \
+  esp_webcam/main/device_auth_values.c esp_webcam/main/cloud_auth_logic.c \
   esp_webcam/managed_components/espressif__cjson/cJSON/cJSON.c -lm -o /tmp/cloud_auth_test
 /tmp/cloud_auth_test
 python3 esp_webcam/tests/test_serial_protocol.py
@@ -270,6 +270,7 @@ python3 esp_webcam/tests/test_serial_protocol.py
 
 `cloud_auth_test`はcloud設定v1/v2移行、IdP URL検証、event_accessのクレーム検証、
 Device Authorization応答の解析、承認・Refreshローテーション・再承認の状態遷移、
+event_accessが更新されたときのFirebase再サインイン判断、Firestore 401/403の再発行判断、
 JSON出力にトークンを含めないことを確認する。`test_serial_protocol.py`はJSON Linesの
 `config`/`status`/`device_authorization`を疑似UARTで実行し、検証エラー、JSONのみの応答、
 Wi-Fiパスワードの非表示、設定保存と再起動を確認する。

@@ -15,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "cloud_auth_logic.h"
 #include "cloud_settings.h"
 #include "device_auth.h"
 #include "firebase_client.h"
@@ -159,8 +160,61 @@ static cJSON *fs_add_map(cJSON *fields, const char *name)
     return inner;
 }
 
+static bool issue_custom_token(const cloud_settings_t *settings, char *custom, int *status)
+{
+    bool ok = firebase_issue_custom_token(network_settings_active()->signaling_url,
+                                          settings->event_access, custom,
+                                          FIREBASE_TOKEN_SIZE, status);
+    if (!ok && cloud_firestore_auth_failed(*status)) {
+        ESP_LOGW(TAG, "event_access rejected; refreshing device authorization");
+        if (device_auth_force_refresh())
+            ok = firebase_issue_custom_token(network_settings_active()->signaling_url,
+                                             settings->event_access, custom,
+                                             FIREBASE_TOKEN_SIZE, status);
+    }
+    return ok;
+}
+
+static bool sign_in_with_custom_token(const cloud_settings_t *settings,
+                                      firebase_session_t *session)
+{
+    char *custom = calloc(1, FIREBASE_TOKEN_SIZE);
+    if (!custom) return false;
+    int status = 0;
+    bool ok = issue_custom_token(settings, custom, &status) &&
+        firebase_sign_in(settings, custom, session);
+    wipe(custom, FIREBASE_TOKEN_SIZE);
+    free(custom);
+    if (!ok) ESP_LOGW(TAG, "Firebase sign-in failed; will retry");
+    return ok;
+}
+
+static bool ensure_session(const cloud_settings_t *settings, firebase_session_t *session)
+{
+    if (!device_auth_ensure_access()) return false;
+
+    cloud_session_action_t action =
+        cloud_session_next_action(session, settings, (int64_t)time(NULL));
+    if (action == CLOUD_SESSION_USE) return true;
+    if (action == CLOUD_SESSION_REFRESH && firebase_refresh(settings, session)) {
+        ESP_LOGI(TAG, "Firebase ID token refreshed");
+        return true;
+    }
+    if (action == CLOUD_SESSION_REISSUE)
+        ESP_LOGI(TAG, "reissuing Firebase token for the current event_access");
+    return sign_in_with_custom_token(settings, session);
+}
+
+static bool recover_firestore_session(const cloud_settings_t *settings,
+                                      firebase_session_t *session)
+{
+    ESP_LOGW(TAG, "Firestore rejected the session; reissuing Firebase token");
+    session->id_token[0] = 0;
+    return ensure_session(settings, session);
+}
+
 static bool write_answer(const cloud_settings_t *settings,
-                         const firebase_session_t *session,
+                         firebase_session_t *session,
                          const char *session_id, const char *sdp, int *status)
 {
     char signal_id[33];
@@ -200,49 +254,24 @@ static bool write_answer(const cloud_settings_t *settings,
     cJSON_Delete(root);
     if (!body) return false;
     bool ok = firebase_firestore_batch_write(settings, session, body, status);
+    if (!ok && cloud_firestore_auth_failed(*status) &&
+        recover_firestore_session(settings, session)) {
+        ok = firebase_firestore_batch_write(settings, session, body, status);
+    }
     wipe(body, strlen(body));
     free(body);
     return ok;
 }
 
-static bool issue_custom_token(const cloud_settings_t *settings, char *custom, int *status)
+static bool firestore_list(const cloud_settings_t *settings, firebase_session_t *session,
+                           const char *path, const char *query, char *out,
+                           size_t out_size, int *status)
 {
-    bool ok = firebase_issue_custom_token(network_settings_active()->signaling_url,
-                                          settings->event_access, custom,
-                                          FIREBASE_TOKEN_SIZE, status);
-    if (!ok && *status == 401) {
-        ESP_LOGW(TAG, "event_access rejected; refreshing device authorization");
-        if (device_auth_force_refresh())
-            ok = firebase_issue_custom_token(network_settings_active()->signaling_url,
-                                             settings->event_access, custom,
-                                             FIREBASE_TOKEN_SIZE, status);
-    }
-    return ok;
-}
-
-static bool ensure_session(const cloud_settings_t *settings, firebase_session_t *session)
-{
-    time_t now = time(NULL);
-    if (session->id_token[0] && (now == 0 || now + 60 < session->id_token_expires_at) &&
-        session->event_access_obtained_at == settings->event_access_obtained_at &&
-        session->event_access_expires_at == settings->event_access_expires_at) {
+    if (firebase_firestore_list(settings, session, path, query, out, out_size, status))
         return true;
-    }
-    if (!device_auth_ensure_access()) return false;
-    if (session->refresh_token[0] && firebase_refresh(settings, session)) {
-        ESP_LOGI(TAG, "Firebase ID token refreshed");
-        return true;
-    }
-
-    char *custom = calloc(1, FIREBASE_TOKEN_SIZE);
-    if (!custom) return false;
-    int status = 0;
-    bool ok = issue_custom_token(settings, custom, &status) &&
-        firebase_sign_in(settings, custom, session);
-    wipe(custom, FIREBASE_TOKEN_SIZE);
-    free(custom);
-    if (!ok) ESP_LOGW(TAG, "Firebase sign-in failed; will retry");
-    return ok;
+    if (!cloud_firestore_auth_failed(*status) ||
+        !recover_firestore_session(settings, session)) return false;
+    return firebase_firestore_list(settings, session, path, query, out, out_size, status);
 }
 
 static void start_sntp(void)
@@ -333,8 +362,8 @@ static void cloud_task(void *arg)
             char path[320];
             snprintf(path, sizeof(path), "%s/sessions", base);
             int status = 0;
-            if (firebase_firestore_list(settings, &session, path, "?pageSize=10",
-                                        http, CLOUD_HTTP_MAX, &status)) {
+            if (firestore_list(settings, &session, path, "?pageSize=10",
+                               http, CLOUD_HTTP_MAX, &status)) {
                 char id[SESSION_ID_SIZE];
                 char created[CREATED_AT_SIZE];
                 if (find_new_session(http, handled_created, id, sizeof(id),
@@ -346,8 +375,6 @@ static void cloud_task(void *arg)
                     answer_written = false;
                     ESP_LOGI(TAG, "session %s requested", target);
                 }
-            } else if (status == 401) {
-                session.id_token[0] = 0;
             }
             next_session_poll = now + SESSION_POLL_MS;
         }
@@ -356,8 +383,8 @@ static void cloud_task(void *arg)
             char path[384];
             snprintf(path, sizeof(path), "%s/sessions/%s/signals", base, target);
             int status = 0;
-            if (firebase_firestore_list(settings, &session, path, "?pageSize=20",
-                                        http, CLOUD_HTTP_MAX, &status)) {
+            if (firestore_list(settings, &session, path, "?pageSize=20",
+                               http, CLOUD_HTTP_MAX, &status)) {
                 offer_sdp[0] = 0;
                 if (find_offer(http, offer_sdp, CLOUD_HTTP_MAX)) {
                     if (webrtc_submit_offer(offer_sdp, target)) {
@@ -367,8 +394,6 @@ static void cloud_task(void *arg)
                     }
                 }
                 wipe(offer_sdp, CLOUD_HTTP_MAX);
-            } else if (status == 401) {
-                session.id_token[0] = 0;
             }
             next_signal_poll = now + SIGNAL_POLL_MS;
         }
@@ -390,8 +415,6 @@ static void cloud_task(void *arg)
                     wipe(write_sdp, strlen(write_sdp));
                     free(write_sdp);
                     write_sdp = NULL;
-                } else if (status == 401) {
-                    session.id_token[0] = 0;
                 }
             } else {
                 wipe(write_sdp, strlen(write_sdp));

@@ -47,7 +47,12 @@ event_access は応答の `expires_in` の70〜80%で更新する。更新は一
 送信前に `refresh_in_progress` を NVS に記録する。新しい Refresh Token を保存してから
 旧トークンを破棄し、`invalid_grant` なら再承認が必要な状態にする。更新中に再起動した場合も
 再承認が必要になる。ネットワーク障害はバックオフして再試行する。
-Firebase の ID トークンは従来どおり `securetoken` で更新する。
+Firebase の ID トークンは、event_access が変わっていない間だけ `securetoken` で更新する。
+event_access を更新したときは、新しい event_access で `IssueFirestoreToken` を呼び直し、
+`signInWithCustomToken` でサインインし直す。`securetoken` の更新だけではカスタムクレームの
+`expires_at` が古いまま残り、古い期限を過ぎると Firestore のルールで拒否されるためだ。
+Firestore が 401/403 を返したときも、現在の event_access でカスタムトークンを取り直して
+サインインし直し、同じ要求を1回だけ再試行する。必要なら event_access の Refresh も行う。
 Refresh Token の期限は24時間で、承認から7日を超えない。7日を過ぎたら再承認する。
 
 トークンと Refresh Token は `cloud` 名前空間に保存し、UART・HTTPログ・`show` には出さない。
