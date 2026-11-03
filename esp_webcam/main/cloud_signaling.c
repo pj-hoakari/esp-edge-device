@@ -26,7 +26,7 @@ static const char *TAG = "cloud";
 
 #define SESSION_ID_SIZE 64
 #define CREATED_AT_SIZE 40
-#define CLOUD_STACK_SIZE 20480
+#define CLOUD_STACK_SIZE 40960
 #define CLOUD_HTTP_MAX (32 * 1024)
 #define SESSION_POLL_MS 1000
 #define SIGNAL_POLL_MS 300
