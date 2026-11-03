@@ -21,6 +21,7 @@
 #include "perf.h"
 #include "network_settings.h"
 #include "cloud_settings.h"
+#include "device_auth.h"
 #include "wifi_auth.h"
 
 static const char *TAG = "mjpeg";
@@ -51,7 +52,8 @@ static int capture_usb_log(const char *format, va_list args)
         portEXIT_CRITICAL(&log_mux);
     }
     if (strstr(line, "DTLS") || strstr(line, "esp_peer") || strstr(line, "SCTP") ||
-        strstr(line, "ICE") || strstr(line, "EAP") || strstr(line, "WPA") || strstr(line, "webcam:")) {
+        strstr(line, "ICE") || strstr(line, "EAP") || strstr(line, "WPA") ||
+        strstr(line, "webcam:") || strstr(line, "cloud:") || strstr(line, "firebase:")) {
         portENTER_CRITICAL(&log_mux);
         memcpy(rtc_logs[rtc_log_count % LOG_LINES], line, LOG_LINE_SIZE);
         rtc_logs[rtc_log_count % LOG_LINES][LOG_LINE_SIZE - 1] = 0;
@@ -122,7 +124,7 @@ static esp_err_t diagnostics(httpd_req_t *req)
     const char *fifo_bias = "other";
 #endif
     int64_t age = s.last_valid_us ? (esp_timer_get_time() - s.last_valid_us) / 1000 : -1;
-    char json[1600];
+    char json[2000];
     int len = snprintf(json, sizeof(json),
         "{\"mode\":\"mjpeg\",\"state\":\"%s\",\"usb_devices\":%d,\"usb_list_error\":%d,"
         "\"uvc_detections\":%"PRIu32",\"open_attempts\":%"PRIu32","
@@ -134,6 +136,7 @@ static esp_err_t diagnostics(httpd_req_t *req)
         "\"requested_width\":%d,\"requested_height\":%d,\"capture_fps\":%d,"
         "\"send_fps\":%d,\"minimum_fps\":6,"
         "\"expected_vid\":%d,\"expected_pid\":%d,\"psram_free\":%u,"
+        "\"internal_free\":%u,\"internal_min\":%u,"
         "\"usb_control_max\":%d,\"usb_fifo_bias\":\"%s\","
         "\"trimmed_jpegs\":%"PRIu32",\"trimmed_bytes\":%"PRIu32","
         "\"missing_soi\":%"PRIu32",\"missing_eoi\":%"PRIu32","
@@ -149,6 +152,8 @@ static esp_err_t diagnostics(httpd_req_t *req)
         CONFIG_WEBCAM_TARGET_FPS,
         CONFIG_WEBCAM_CAMERA_VID, CONFIG_WEBCAM_CAMERA_PID,
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+        (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
         CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE, fifo_bias,
         s.trimmed_jpegs, s.trimmed_bytes, s.missing_soi, s.missing_eoi,
         s.invalid_no_soi, s.invalid_marker, s.invalid_truncated, s.invalid_no_sof,
@@ -295,6 +300,7 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
     network_settings_load();
     cloud_settings_load();
+    device_auth_initialize();
     network_settings_console_start();
     if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) < 4 * 1024 * 1024) {
         ESP_LOGE(TAG, "Octal PSRAM missing"); return;

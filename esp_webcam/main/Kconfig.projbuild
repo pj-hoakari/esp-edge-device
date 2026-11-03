@@ -53,6 +53,14 @@ config WEBCAM_EDGE_DEVICE_ID
     help
         Public ID of this ESP camera in the signaling path. It is not a
         credential. Use the same value in the observation page's ?camera=.
+config WEBCAM_IDP_URL
+    string "IdP issuer base URL (empty = provisioning only)"
+    default ""
+    help
+        Base URL of the IdP issuer, for example https://auth.example.com.
+        The ESP calls /oauth2/device_authorization and /oauth2/token on this
+        origin. Must be an HTTP(S) origin with no path or trailing slash.
+        Web Serial provisioning normally supplies this value.
 config WEBCAM_FIREBASE_PROJECT_ID
     string "Firebase project ID"
     default ""

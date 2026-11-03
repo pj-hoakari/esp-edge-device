@@ -16,6 +16,9 @@
 #include "network_diagnostics.h"
 #include "network_probes.h"
 #include "cloud_settings.h"
+#include "cloud_settings_values.h"
+#include "device_auth.h"
+#include "cJSON.h"
 
 static const char *TAG = "network_config";
 /* Active settings are immutable after load: HTTP/peer tasks can read without
@@ -97,9 +100,9 @@ void network_settings_load(void)
 
 const network_settings_t *network_settings_active(void) { return &active; }
 
-static void save_settings(const network_settings_t *next)
+static bool write_settings(const network_settings_t *next)
 {
-    if (!valid_settings(next)) { puts("Invalid settings; nothing saved."); return; }
+    if (!valid_settings(next)) return false;
     nvs_handle_t handle;
     esp_err_t err = nvs_open("network", NVS_READWRITE, &handle);
     if (err == ESP_OK) {
@@ -109,8 +112,22 @@ static void save_settings(const network_settings_t *next)
     }
     if (err == ESP_OK) {
         saved = *next;
-        puts("Saved. Type reboot to apply all saved settings.");
-    } else printf("Save failed: %s. Retry before rebooting.\n", esp_err_to_name(err));
+        return true;
+    }
+    ESP_LOGW(TAG, "settings save failed: %s", esp_err_to_name(err));
+    return false;
+}
+
+bool network_settings_save(const network_settings_t *settings)
+{
+    return write_settings(settings);
+}
+
+static void save_settings(const network_settings_t *next)
+{
+    if (!valid_settings(next)) { puts("Invalid settings; nothing saved."); return; }
+    if (write_settings(next)) puts("Saved. Type reboot to apply all saved settings.");
+    else puts("Save failed. Retry before rebooting.");
 }
 
 /* echo_mode: 0 = ordinary text, 1 = password mask, 2 = hidden file upload. */
@@ -285,7 +302,7 @@ static void configure_signaling(void)
 {
     char text[NETWORK_SIGNALING_SIZE];
     network_settings_t next = saved;
-    puts("Enter IPv4/hostname[:port] (default 8080), http://host:port, or off.");
+    puts("Enter IPv4/hostname[:port] (default http:8080), http(s)://host[:port], or off.");
     if (read_line("Signaling server: ", text, sizeof(text), false)) {
         if (text[0] && network_signaling_normalize(text, next.signaling_url, sizeof(next.signaling_url)))
             save_settings(&next);
@@ -298,31 +315,34 @@ static void configure_cloud(void)
 {
     cloud_settings_t next = *cloud_settings_saved();
     char edge[CLOUD_EDGE_ID_SIZE];
+    char idp[CLOUD_IDP_URL_SIZE];
     char project[CLOUD_PROJECT_SIZE];
     char key[CLOUD_API_KEY_SIZE];
     char firestore[CLOUD_HOST_SIZE];
     char auth[CLOUD_HOST_SIZE];
     puts("Cloud signaling setup. The Edge Bridge URL is set by the signaling command.");
-    puts("Ctrl-C cancels. The event_access token is set separately with token.");
+    puts("Ctrl-C cancels. Device authorization obtains event_access automatically.");
     if (!read_line("Edge device ID (16 lowercase hex): ", edge, sizeof(edge), false)) goto done;
+    if (!read_line("IdP issuer (http(s)://host[:port], no path): ", idp, sizeof(idp), false)) goto done;
     if (!read_line("Firebase project ID: ", project, sizeof(project), false)) goto done;
     if (!read_line("Firebase Web API key: ", key, sizeof(key), false)) goto done;
-    if (!read_line("Firestore emulator host:port (empty = production): ", firestore, sizeof(firestore), false)) goto done;
-    if (!read_line("Auth emulator host:port (empty = production): ", auth, sizeof(auth), false)) goto done;
+    if (!read_line("Firestore emulator (host:port or https://host; empty = production): ", firestore, sizeof(firestore), false)) goto done;
+    if (!read_line("Auth emulator (host:port or https://host; empty = production): ", auth, sizeof(auth), false)) goto done;
+    snprintf(next.idp_url, sizeof(next.idp_url), "%s", idp);
     snprintf(next.edge_device_id, sizeof(next.edge_device_id), "%s", edge);
     snprintf(next.firebase_project_id, sizeof(next.firebase_project_id), "%s", project);
     snprintf(next.firebase_api_key, sizeof(next.firebase_api_key), "%s", key);
     snprintf(next.firestore_emulator_host, sizeof(next.firestore_emulator_host), "%s", firestore);
     snprintf(next.auth_emulator_host, sizeof(next.auth_emulator_host), "%s", auth);
-    if (!cloud_settings_valid(&next)) {
-        puts("Invalid cloud settings. Edge ID must be 16 lowercase hex; project/API key are required; hosts are host[:port] or empty.");
+    if (!next.idp_url[0] || !cloud_idp_url_valid(next.idp_url) || !cloud_settings_valid(&next)) {
+        puts("Invalid cloud settings. Edge ID must be 16 lowercase hex; IdP must be an HTTP(S) origin; project/API key are required; hosts are host[:port] or empty.");
     } else if (cloud_settings_save(&next)) {
-        puts("Cloud settings saved. Set token, then reboot.");
+        puts("Cloud settings saved. Reboot to start device authorization.");
     } else {
         puts("Cloud settings save failed.");
     }
 done:
-    wipe(edge, sizeof(edge)); wipe(project, sizeof(project)); wipe(key, sizeof(key));
+    wipe(edge, sizeof(edge)); wipe(idp, sizeof(idp)); wipe(project, sizeof(project)); wipe(key, sizeof(key));
     wipe(firestore, sizeof(firestore)); wipe(auth, sizeof(auth));
     wipe(&next, sizeof(next));
 }
@@ -349,6 +369,224 @@ done:
     wipe(&next, sizeof(next));
 }
 
+static bool json_field(const cJSON *root, const char *name, char *out, size_t size)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
+    if (!cJSON_IsString(item) || !item->valuestring) return false;
+    if (strlen(item->valuestring) >= size) return false;
+    memcpy(out, item->valuestring, strlen(item->valuestring) + 1);
+    return true;
+}
+
+static void json_print(cJSON *root)
+{
+    if (!root) return;
+    char *line = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!line) return;
+    printf("%s\n", line);
+    fflush(stdout);
+    cJSON_free(line);
+}
+
+static void json_error(const char *message)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+    cJSON_AddStringToObject(root, "type", "error");
+    cJSON_AddStringToObject(root, "error", message);
+    json_print(root);
+}
+
+static void json_config_result(bool ok, const char *error)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+    cJSON_AddStringToObject(root, "type", "config_result");
+    cJSON_AddBoolToObject(root, "ok", ok);
+    if (!ok && error) cJSON_AddStringToObject(root, "error", error);
+    json_print(root);
+}
+
+static void reboot_after_config(void)
+{
+    vTaskDelay(pdMS_TO_TICKS(500));
+    fflush(stdout);
+    uart_wait_tx_done(CONFIG_ESP_CONSOLE_UART_NUM, pdMS_TO_TICKS(500));
+    esp_restart();
+}
+
+static void json_config(const cJSON *root)
+{
+    const cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
+    if (!cJSON_IsNumber(version) || version->valueint != 1) {
+        json_config_result(false, "unsupported_version");
+        return;
+    }
+
+    char ssid[sizeof(((network_settings_t *)0)->ssid)];
+    char password[sizeof(((network_settings_t *)0)->password)];
+    char signaling[NETWORK_SIGNALING_SIZE];
+    char idp[CLOUD_IDP_URL_SIZE];
+    char project[CLOUD_PROJECT_SIZE];
+    char key[CLOUD_API_KEY_SIZE];
+    char firestore[CLOUD_HOST_SIZE];
+    char auth[CLOUD_HOST_SIZE];
+    char edge[CLOUD_EDGE_ID_SIZE];
+    bool fields = json_field(root, "wifi_ssid", ssid, sizeof(ssid)) &&
+        json_field(root, "wifi_password", password, sizeof(password)) &&
+        json_field(root, "signaling_url", signaling, sizeof(signaling)) &&
+        json_field(root, "idp_url", idp, sizeof(idp)) &&
+        json_field(root, "firebase_project_id", project, sizeof(project)) &&
+        json_field(root, "firebase_api_key", key, sizeof(key)) &&
+        json_field(root, "firestore_emulator_host", firestore, sizeof(firestore)) &&
+        json_field(root, "firebase_auth_emulator_host", auth, sizeof(auth)) &&
+        json_field(root, "edge_device_id", edge, sizeof(edge));
+    if (!fields) {
+        wipe(ssid, sizeof(ssid)); wipe(password, sizeof(password));
+        wipe(signaling, sizeof(signaling)); wipe(idp, sizeof(idp));
+        wipe(project, sizeof(project)); wipe(key, sizeof(key));
+        wipe(firestore, sizeof(firestore)); wipe(auth, sizeof(auth));
+        wipe(edge, sizeof(edge));
+        json_config_result(false, "missing_or_invalid_field");
+        return;
+    }
+
+    if (!network_wifi_valid(ssid, password)) {
+        wipe(ssid, sizeof(ssid)); wipe(password, sizeof(password));
+        wipe(signaling, sizeof(signaling)); wipe(idp, sizeof(idp));
+        wipe(project, sizeof(project)); wipe(key, sizeof(key));
+        wipe(firestore, sizeof(firestore)); wipe(auth, sizeof(auth));
+        wipe(edge, sizeof(edge));
+        json_config_result(false, "invalid_wifi");
+        return;
+    }
+
+    network_settings_t net = {
+        .version = NETWORK_SETTINGS_VERSION,
+        .enterprise_link = NETWORK_LINK_WPA2,
+        .server_trust = NETWORK_TRUST_CA,
+    };
+    snprintf(net.ssid, sizeof(net.ssid), "%s", ssid);
+    snprintf(net.password, sizeof(net.password), "%s", password);
+    bool signaling_ok = signaling[0] &&
+        network_signaling_normalize(signaling, net.signaling_url, sizeof(net.signaling_url));
+    cloud_settings_t cloud = {.version = CLOUD_SETTINGS_VERSION};
+    snprintf(cloud.edge_device_id, sizeof(cloud.edge_device_id), "%s", edge);
+    snprintf(cloud.firebase_project_id, sizeof(cloud.firebase_project_id), "%s", project);
+    snprintf(cloud.firebase_api_key, sizeof(cloud.firebase_api_key), "%s", key);
+    snprintf(cloud.firestore_emulator_host, sizeof(cloud.firestore_emulator_host), "%s", firestore);
+    snprintf(cloud.auth_emulator_host, sizeof(cloud.auth_emulator_host), "%s", auth);
+    snprintf(cloud.idp_url, sizeof(cloud.idp_url), "%s", idp);
+    bool cloud_ok = idp[0] && cloud_idp_url_valid(idp) && cloud_settings_valid(&cloud);
+
+    bool ok = false;
+    if (!signaling_ok) {
+        json_config_result(false, "invalid_signaling_url");
+    } else if (!cloud_ok) {
+        json_config_result(false, "invalid_cloud_settings");
+    } else if (!network_settings_save(&net)) {
+        json_config_result(false, "save_failed");
+    } else if (!cloud_settings_save(&cloud)) {
+        json_config_result(false, "save_failed");
+    } else {
+        json_config_result(true, NULL);
+        ok = true;
+    }
+
+    wipe(ssid, sizeof(ssid)); wipe(password, sizeof(password));
+    wipe(signaling, sizeof(signaling)); wipe(idp, sizeof(idp));
+    wipe(project, sizeof(project)); wipe(key, sizeof(key));
+    wipe(firestore, sizeof(firestore)); wipe(auth, sizeof(auth));
+    wipe(edge, sizeof(edge));
+    wipe(&net, sizeof(net));
+    wipe(&cloud, sizeof(cloud));
+    if (ok) reboot_after_config();
+}
+
+static void json_status(void)
+{
+    const cloud_settings_t *cloud = cloud_settings_active();
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+    cJSON_AddStringToObject(root, "type", "status");
+    cJSON_AddBoolToObject(root, "configured", cloud_settings_configured());
+    cJSON_AddStringToObject(root, "edge_device_id", cloud->edge_device_id);
+    cJSON_AddStringToObject(root, "authorization", cloud_authorization_name(cloud));
+    json_print(root);
+}
+
+static void handle_json_command(const char *line)
+{
+    cJSON *root = cJSON_ParseWithOpts(line, NULL, true);
+    if (!root) {
+        json_error("invalid_json");
+        return;
+    }
+    const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
+    if (!cJSON_IsString(type) || !type->valuestring) {
+        cJSON_Delete(root);
+        json_error("missing_type");
+        return;
+    }
+    if (!strcmp(type->valuestring, "config")) {
+        json_config(root);
+    } else if (!strcmp(type->valuestring, "status")) {
+        json_status();
+    } else if (!strcmp(type->valuestring, "device_authorization")) {
+        device_auth_start();
+    } else if (!strcmp(type->valuestring, "reboot")) {
+        cJSON *reply = cJSON_CreateObject();
+        cJSON_AddStringToObject(reply, "type", "reboot");
+        cJSON_AddBoolToObject(reply, "ok", true);
+        json_print(reply);
+        reboot_after_config();
+    } else {
+        json_error("unknown_command");
+    }
+    cJSON_Delete(root);
+}
+
+static bool read_command_line(const char *prompt, char *out, size_t size)
+{
+    bool started = false;
+    bool silent = false;
+    for (;;) {
+        unsigned char c;
+        if (uart_read_bytes(CONFIG_ESP_CONSOLE_UART_NUM, &c, 1, pdMS_TO_TICKS(100)) != 1)
+            continue;
+        bool crlf_tail = input.skip_lf && c == '\n';
+        if (!started) {
+            started = true;
+            silent = c == '{';
+            bool was_logging = atomic_exchange(&uart_logs, false);
+            if (!silent) {
+                if (was_logging) printf("\nUART logs paused.\n");
+                printf("%s", prompt);
+                fflush(stdout);
+            }
+        }
+        size_t before = input.length;
+        serial_result_t result = serial_input_feed(&input, out, size, c);
+        if (crlf_tail) continue;
+        if (result == SERIAL_MORE) {
+            if (!silent) {
+                if (input.length > before) putchar(c);
+                else if (input.length < before) printf("\b \b");
+                fflush(stdout);
+            }
+            continue;
+        }
+        if (!silent) puts("");
+        if (result != SERIAL_READY) {
+            wipe(out, size);
+            if (silent) json_error(result == SERIAL_CANCEL ? "cancelled" : "invalid_json");
+            else puts(result == SERIAL_CANCEL ? "Cancelled." : "Invalid/overlong input; nothing saved.");
+        }
+        return result == SERIAL_READY;
+    }
+}
+
 static void show_settings(const char *label, const network_settings_t *s)
 {
     printf("%s\n  SSID: %s\n  Password: %s\n  Signaling: %s\n", label,
@@ -368,12 +606,13 @@ static void show_settings(const char *label, const network_settings_t *s)
 
 static void console_task(void *arg)
 {
-    puts("\nNetwork setup ready. Commands: help, show, ping [IPv4], check signaling/stun, wifi, eap, protocols, credentials, clock, signaling, cloud, token, reboot, logs on/off.");
+    puts("\nNetwork setup ready. Commands: help, show, ping [IPv4], check signaling/stun, wifi, eap, protocols, credentials, clock, signaling, cloud, token, reboot, logs on/off. JSON Lines: config/status/device_authorization/reboot.");
     puts("UART logs paused. Disable terminal local echo. Password is masked.");
     puts("Use logs on to monitor; press Enter to pause logs and return to setup.");
     for (;;) {
-        char command[32];
-        if (!read_line("\nesp> ", command, sizeof(command), false)) continue;
+        char command[2048];
+        if (!read_command_line("\nesp> ", command, sizeof(command))) continue;
+        if (command[0] == '{') { handle_json_command(command); wipe(command, sizeof(command)); continue; }
         if (!strcmp(command, "wifi")) configure_wifi();
         else if (!strcmp(command, "eap")) configure_eap();
         else if (!strcmp(command, "protocols")) list_protocols();

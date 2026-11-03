@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 
 #include "cloud_settings.h"
+#include "device_auth.h"
 #include "firebase_client.h"
 #include "network_settings.h"
 #include "webrtc.h"
@@ -62,6 +63,15 @@ static const cJSON *fs_map_fields(const cJSON *fields, const char *name)
     return cJSON_GetObjectItemCaseSensitive(map, "fields");
 }
 
+/* Firestore returns server timestamps as timestampValue (RFC3339 string),
+ * not stringValue. createdAt is written with a server timestamp. */
+static const char *fs_timestamp(const cJSON *fields, const char *name)
+{
+    const cJSON *entry = cJSON_GetObjectItemCaseSensitive(fields, name);
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(entry, "timestampValue");
+    return cJSON_IsString(value) ? value->valuestring : NULL;
+}
+
 static bool document_id(const char *name, char *out, size_t size)
 {
     if (!name) return false;
@@ -85,7 +95,7 @@ static bool find_new_session(const char *body, const char *handled_created,
     cJSON_ArrayForEach(document, documents) {
         const cJSON *fields = fs_fields(document);
         const char *status = fs_string(fields, "status");
-        const char *created_at = fs_string(fields, "createdAt");
+        const char *created_at = fs_timestamp(fields, "createdAt");
         if (!status || strcmp(status, "requested") || !created_at) continue;
         if (handled_created && handled_created[0] && strcmp(created_at, handled_created) <= 0) continue;
         if (best_created[0] && strcmp(created_at, best_created) <= 0) continue;
@@ -113,7 +123,7 @@ static bool find_offer(const char *body, char *sdp, size_t sdp_size)
         const cJSON *fields = fs_fields(document);
         const char *from = fs_string(fields, "from");
         if (!from || strcmp(from, "console")) continue;
-        const char *created_at = fs_string(fields, "createdAt");
+        const char *created_at = fs_timestamp(fields, "createdAt");
         if (!created_at) continue;
 
         const cJSON *payload = fs_map_fields(fields, "payload");
@@ -195,17 +205,30 @@ static bool write_answer(const cloud_settings_t *settings,
     return ok;
 }
 
+static bool issue_custom_token(const cloud_settings_t *settings, char *custom, int *status)
+{
+    bool ok = firebase_issue_custom_token(network_settings_active()->signaling_url,
+                                          settings->event_access, custom,
+                                          FIREBASE_TOKEN_SIZE, status);
+    if (!ok && *status == 401) {
+        ESP_LOGW(TAG, "event_access rejected; refreshing device authorization");
+        if (device_auth_force_refresh())
+            ok = firebase_issue_custom_token(network_settings_active()->signaling_url,
+                                             settings->event_access, custom,
+                                             FIREBASE_TOKEN_SIZE, status);
+    }
+    return ok;
+}
+
 static bool ensure_session(const cloud_settings_t *settings, firebase_session_t *session)
 {
     time_t now = time(NULL);
-    if (session->id_token[0] && (now == 0 || now + 60 < session->id_token_expires_at)) {
+    if (session->id_token[0] && (now == 0 || now + 60 < session->id_token_expires_at) &&
+        session->event_access_obtained_at == settings->event_access_obtained_at &&
+        session->event_access_expires_at == settings->event_access_expires_at) {
         return true;
     }
-    if (settings->event_access_expires_at > 0 && now > 0 &&
-        now + 60 >= settings->event_access_expires_at) {
-        ESP_LOGE(TAG, "event_access expired; set a new token with the serial 'token' command");
-        return false;
-    }
+    if (!device_auth_ensure_access()) return false;
     if (session->refresh_token[0] && firebase_refresh(settings, session)) {
         ESP_LOGI(TAG, "Firebase ID token refreshed");
         return true;
@@ -213,8 +236,8 @@ static bool ensure_session(const cloud_settings_t *settings, firebase_session_t 
 
     char *custom = calloc(1, FIREBASE_TOKEN_SIZE);
     if (!custom) return false;
-    bool ok = firebase_issue_custom_token(network_settings_active()->signaling_url,
-                                          settings->event_access, custom, FIREBASE_TOKEN_SIZE) &&
+    int status = 0;
+    bool ok = issue_custom_token(settings, custom, &status) &&
         firebase_sign_in(settings, custom, session);
     wipe(custom, FIREBASE_TOKEN_SIZE);
     free(custom);
@@ -244,9 +267,7 @@ static void cloud_task(void *arg)
         return;
     }
 
-    char base[256];
-    snprintf(base, sizeof(base), "tenants/%s/events/%s/edgeDevices/%s",
-             settings->tenant_id, settings->event_id, settings->edge_device_id);
+    ESP_LOGI(TAG, "cloud task started");
     char target[SESSION_ID_SIZE] = {0};
     char target_created[CREATED_AT_SIZE] = {0};
     char handled_created[CREATED_AT_SIZE] = {0};
@@ -261,12 +282,35 @@ static void cloud_task(void *arg)
     int64_t next_answer_poll = 0;
 
     start_sntp();
-    ESP_LOGI(TAG, "edge=%s tenant=%s event=%s bridge=%s", settings->edge_device_id,
-             settings->tenant_id, settings->event_id,
-             network_settings_active()->signaling_url);
+    bool reported_reapproval = false;
 
     for (;;) {
+        if (!device_auth_ensure_access()) {
+            if (settings->authorization_state == CLOUD_AUTH_REAPPROVAL_REQUIRED) {
+                if (!reported_reapproval) {
+                    printf("{\"type\":\"error\",\"error\":\"authorization_required\"}\n");
+                    fflush(stdout);
+                    ESP_LOGE(TAG, "reapproval required; signaling stopped");
+                    reported_reapproval = true;
+                }
+            } else {
+                reported_reapproval = false;
+            }
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+        reported_reapproval = false;
         if (!ensure_session(settings, &session)) {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+
+        char base[256];
+        int base_length = snprintf(base, sizeof(base), "tenants/%s/events/%s/edgeDevices/%s",
+                                   settings->tenant_id, settings->event_id,
+                                   settings->edge_device_id);
+        if (base_length < 0 || (size_t)base_length >= sizeof(base) ||
+            !settings->tenant_id[0] || !settings->event_id[0]) {
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
@@ -374,10 +418,14 @@ static void cloud_task(void *arg)
 
 void cloud_signaling_start(void)
 {
-    if (!cloud_settings_ready()) {
-        ESP_LOGW(TAG, "cloud signaling disabled (run cloud/token/signaling, then reboot)");
+    const cloud_settings_t *settings = cloud_settings_active();
+    if (!cloud_settings_valid(settings) || !settings->edge_device_id[0] ||
+        !network_settings_active()->signaling_url[0]) {
+        ESP_LOGW(TAG, "cloud signaling disabled (run cloud/signaling, then reboot)");
         return;
     }
+    ESP_LOGI(TAG, "edge=%s idp=%s bridge=%s", settings->edge_device_id,
+             settings->idp_url, network_settings_active()->signaling_url);
     if (xTaskCreatePinnedToCore(cloud_task, "cloud", CLOUD_STACK_SIZE, NULL, 4, NULL, 0) != pdPASS) {
         ESP_LOGE(TAG, "failed to start cloud signaling task");
     }

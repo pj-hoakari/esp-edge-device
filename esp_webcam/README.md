@@ -9,32 +9,47 @@ edge ピアとして参加する。ブラウザ（観測ページ）が ESP セ�
 間隔で読む。映像は従来どおり `jpeg` DataChannel（JPG1 断片）で送る。
 
 必要な設定は NVS の `cloud` と `network` に保存する。Edge Bridge の URL は既存の
-`signaling` コマンド、Firebase と ESP の ID は `cloud`、事前発行した `event_access` は
-`token` で投入する。設定後は `reboot` で反映する。
+`signaling` コマンド、Firebase・ESP の ID・IdP の issuer は `cloud` で設定する。
+通常は管理UIの Web Serial から JSON Lines でまとめて書き込み、設定後に自動で再起動する。
 
 ```text
 signaling            -> http://<Edge Bridge のホスト>:8787
-cloud                -> Edge device ID / Firebase project ID / API key /
-                        Firestore emulator host / Auth emulator host
-                        （エミュレータは ESP から到達できる PC の LAN IP:port）
-token                -> event_access JWT（マスク入力）
-show                 -> active/saved の cloud 設定とトークンの有無を確認
+cloud                -> Edge device ID / IdP issuer / Firebase project ID / API key /
+                        Firestore / Auth のエミュレータ
+                        （LAN IP:port、または https://<TryCloudflare ドメイン>）
+device_authorization -> Device Authorization を開始し、user_code を JSON で出力
+show                 -> active/saved の cloud 設定と認可状態を確認
 reboot
 ```
 
-`event_access` は tolo-web の開発手順と同じく fakeidp から発行する。
-`client_id` は `edge-page`、`tenant_id` と `event_id` は観測ページを開くイベントに合わせる。
+ESP は IdP の public client `esp-camera` として Device Authorization Grant を使う。
+`scope` は `events.stream` だけで、`tenant_id` / `event_id` / `edge_device_id` は
+スタッフが管理UIで承認した内容から event_access のクレームに入る。ESP 自身は
+`event_id` や `edge_device_id` を Device Authorization 要求に送らない。
+起動後は認可がなければ自動で Device Authorization を開始し、`user_code` をシリアルへ
+JSON Lines で出力する。承認後は event_access を取得し、期限の70〜80%で Refresh Token
+を使って更新する。トークンと Refresh Token は NVS に保存し、ログや画面には出さない。
 
-```bash
-curl -sf http://localhost:8082/token \
-  -H 'Content-Type: application/json' \
-  -d '{"token_use":"event_access","sub":"dev-esp","client_id":"edge-page","scope":"events.report","tenant_id":"0123456789abcdef","event_id":"fedcba9876543210","ttl_seconds":86400}' \
-  | jq -r .access_token
+Web Serial の設定コマンドは次の形式（1行1JSON、`\n` 終端）。
+
+```json
+{"type":"config","version":1,"wifi_ssid":"...","wifi_password":"...","signaling_url":"http://host:8787","idp_url":"https://auth.example","firebase_project_id":"...","firebase_api_key":"...","firestore_emulator_host":"","firebase_auth_emulator_host":"","edge_device_id":"0123456789abcdef"}
 ```
 
-トークンの `exp` が切れると ESP は再サインインできない。`token` で再投入して `reboot` する。
+成功時は `{"type":"config_result","ok":true}` を返して約500ms後に再起動する。
+`status`・`device_authorization`・`reboot` もJSONで応答する。Wi-Fiパスワードと
+トークンはJSONにもログにも出さない。
+
+Firestore / Auth を TryCloudflare 経由にする場合は、tolo-web 側で
+`task esp-tunnel` を実行し、表示される2つのURLを使う（edge-bridge 用と
+Firestore/Auth 用で別ドメイン）。URL はトンネル再起動で変わるため、その都度
+`signaling` / `cloud` または Web Serial で設定し直す。メール認証付きの `task tunnel` は
+ESP には使えない。
+
 時刻は SNTP（`pool.ntp.org`）で合わせる。オフライン環境では既存の `clock` で設定する。
 Firestore と HTTPS の都合上、ESP の時計が大きくずれていると接続できない。
+Refresh が `invalid_grant` を返した場合や、更新中に再起動した場合は再承認が必要になる。
+そのときは `show` の `Authorization: required` を確認し、管理UIから再度承認する。
 
 ESP の `edgeDeviceId` は 16 桁小文字 hex とする。観測ページの管理UI向け URL
 （`.../observation/<観測ページのedgeDeviceId>`）に `?camera=<ESPのedgeDeviceId>` を足す。
@@ -125,8 +140,8 @@ python -m serial.tools.miniterm COM3 115200 --dtr 1 --rts 0 --eol CRLF
 | `credentials` | CA・クライアント証明書・秘密鍵・PACの保存有無とサイズを表示 |
 | `clock` | 起動中のUTC Unix秒を設定。証明書の有効期間検証用 |
 | `signaling` | Edge Bridge のIPv4・ホスト名・`http(s)://` URLを入力し保存。`off`でWebRTCを無効化 |
-| `cloud` | Edge device ID・Firebase project/API key・Firestore/Auth emulator ホストを設定 |
-| `token` | 事前発行した`event_access` JWTをマスク入力で保存 |
+| `cloud` | Edge device ID・IdP issuer・Firebase project/API key・Firestore/Auth エミュレータを設定（`host:port` または `https://host`） |
+| `token` | 復旧用。event_access JWTをマスク入力で保存（通常はDevice Authorizationを使う） |
 | `show` | 現在のIP・設定と次回起動用の保存設定を表示。パスワード・トークンは設定有無だけ表示 |
 | `ping [IPv4]` | IPv4へ3回のICMP疎通確認。宛先省略時はゲートウェイ |
 | `check signaling` / `check stun` | 設定済みサーバーへの読み取り専用HTTP(S)／UDP Binding疎通確認 |
@@ -170,6 +185,29 @@ IO0のGND接続を外してENリセットする。NVS保存・再起動後のWi-
 `tests/test_network_console.py`は実際のコンソール処理をUART/NVSのPC用アダプターで動かし、
 ログ切替、CRLF、通常入力の表示、秘密入力のマスク、キャンセル、NVSからの再読込みを検証する。
 MSVC開発者コマンドプロンプトで`python esp_webcam/tests/test_network_console.py`を実行し、成功した。
+
+Device Authorization とクラウド設定のPCテストは次のとおり。
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -I esp_webcam/main \
+  -I esp_webcam/managed_components/espressif__cjson/cJSON \
+  esp_webcam/tests/cloud_auth_test.c esp_webcam/main/cloud_settings_values.c \
+  esp_webcam/main/device_auth_values.c \
+  esp_webcam/managed_components/espressif__cjson/cJSON/cJSON.c -lm -o /tmp/cloud_auth_test
+/tmp/cloud_auth_test
+python3 esp_webcam/tests/test_serial_protocol.py
+```
+
+`cloud_auth_test`はcloud設定v1/v2移行、IdP URL検証、event_accessのクレーム検証、
+Device Authorization応答の解析、承認・Refreshローテーション・再承認の状態遷移、
+JSON出力にトークンを含めないことを確認する。`test_serial_protocol.py`はJSON Linesの
+`config`/`status`/`device_authorization`を疑似UARTで実行し、検証エラー、JSONのみの応答、
+Wi-Fiパスワードの非表示、設定保存と再起動を確認する。
+
+2026-11-03のPhase 6変更では、上記の2テストと既存の`network_settings_test.c`が成功した。
+DockerのESP-IDF v6.1（`espressif/idf:v6.1`）で`idf.py build`が成功し、
+appは1,423,424 bytes（0x15b840）、アプリ領域0x177000に対して0x1b7c0（7%）空き。
+実機の書き込み・Device Authorizationの実IdP接続は未実施。
 ログ表示修正版も同じCOM3経由で書き込み、全イメージのハッシュ照合に成功。
 IO0のGND接続を外してENリセットした実機で、次を確認した。
 
@@ -488,17 +526,22 @@ git submodule update --init --recursive
    ```
 
 4. `ESP webcam`でSSID・パスワード・カメラ対応fps・送信目標fps・
-   `Edge Bridge base URL`・`STUN server URL`を入力する。Firebase と edgeDeviceId、
-   event_access は書き込み後にシリアル（`signaling` / `cloud` / `token`）で設定する。
+   `Edge Bridge base URL`・`STUN server URL`を入力する。Firebase・IdP・edgeDeviceId は
+   書き込み後に Web Serial またはシリアル（`signaling` / `cloud`）で設定する。
+   event_access は Device Authorization で自動取得する。
    保存済みNVS設定があればそちらを優先する。
    認証情報はローカルの` sdkconfig `とビルド成果物に含まれるため、これらを共有しない。
    ソース・既定値・実行ログには認証情報を記載しない。
-5. ビルドしてUART経由で書き込む。COM番号は実際のポートへ置き換える。
+5. ビルドして書き込む。COM番号は実際のポートへ置き換える。
 
    ```powershell
    idf.py build
-   idf.py -p COM5 flash monitor
+   python tools/flash_serial.py --port COM5 --check
+   python tools/flash_serial.py --port COM5
    ```
+
+   Pico debugprobe の UART 経由は `tools/flash_debugprobe.py` を使う。
+   `idf.py -p COM5 flash monitor` でも書き込める。
 
 6. 給電・USBホスト配線を確認した上で、対象カメラをPCから外してESP側のホストポートへ接続する。
    観測ページ `.../observation/<観測ページのedgeDeviceId>?camera=<ESPのedgeDeviceId>` を開き、
