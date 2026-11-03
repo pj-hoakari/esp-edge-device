@@ -39,3 +39,6 @@ CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
 # DTLS datagrams are capped at 1500 bytes; save 12 KiB per receive context.
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+
+# The cloud/NVS migration uses large stack objects; keep the main task above them.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
