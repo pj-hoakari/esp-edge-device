@@ -14,7 +14,6 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
-#include "nvs_flash.h"
 #include "usb/usb_host.h"
 #include "camera.h"
 #include "webrtc.h"
@@ -22,6 +21,7 @@
 #include "network_settings.h"
 #include "cloud_settings.h"
 #include "device_auth.h"
+#include "nvs_boot.h"
 #include "wifi_auth.h"
 
 static const char *TAG = "mjpeg";
@@ -293,11 +293,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 void app_main(void)
 {
     original_log = esp_log_set_vprintf(capture_usb_log);
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase()); err = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(err);
+    ESP_ERROR_CHECK(nvs_boot_init());
     network_settings_load();
     cloud_settings_load();
     device_auth_initialize();
@@ -315,7 +311,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL));
     const network_settings_t *settings = network_settings_active();
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    err = wifi_auth_configure(settings);
+    esp_err_t err = wifi_auth_configure(settings);
     if (err != ESP_OK) {
         /* UART logs are paused by default. Keep setup failures visible while
          * leaving the console alive for missing credentials or bad profiles. */

@@ -10,6 +10,17 @@ config WEBCAM_WIFI_PASSWORD
     default ""
     help
         Fallback only. Saved UART network settings take precedence.
+config WEBCAM_NVS_ENCRYPTION
+    bool "Encrypt NVS (cloud settings, tokens, Wi-Fi credentials)"
+    default y
+    help
+        Initialize the default NVS partition with the XTS-AES keys stored in
+        the nvs_keys partition. New devices generate the keys on first boot.
+        If the key partition is missing or encrypted init fails, the firmware
+        falls back to unencrypted NVS so existing devices stay bootable.
+        Disable this to initialize NVS without encryption. A device that
+        already holds encrypted NVS must be erased and reprovisioned when this
+        option is changed.
 config WEBCAM_CAMERA_FPS
     int "UVC capture FPS (10 or 15 for 1280x720)"
     range 6 30

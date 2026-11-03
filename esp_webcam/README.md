@@ -61,6 +61,75 @@ Auth にサインインし、`sessions` と `signals` を読み書きする。`v
 `/api/esp/offer`・`/api/esp/answer` はもう使わない。
 契約・設定・確認手順の詳細は [tolo-edge-bridge 接続メモ](../docs/tolo-edge-bridge-20261102.md) を参照する。
 
+## NVS暗号化とパーティション（2026-11追加）
+
+NVSにはWi-Fi資格情報、EAP証明書・秘密鍵、クラウド設定、`event_access`、
+Refresh Tokenが保存される。ADR-0127の「可能なら保存領域を暗号化する」に合わせ、
+ESP-IDFのNVS暗号化（XTS-AES）を使う。8MBフラッシュ用の
+`esp_webcam/partitions.csv`へ`nvs_keys`パーティションを追加した。
+factoryのオフセットとサイズは従来の`partitions_singleapp_large.csv`と同じ
+`0x10000` / `0x177000`のままとし、既存のアプリ配置を変えない。
+
+| 名前 | 種別 | オフセット | サイズ | 備考 |
+| --- | --- | --- | --- | --- |
+| `nvs` | data / nvs | `0x9000` | `0x6000` | 設定・トークン |
+| `phy_init` | data / phy | `0xf000` | `0x1000` | |
+| `factory` | app / factory | `0x10000` | `0x177000` | 従来と同じ |
+| `nvs_keys` | data / nvs_keys | `0x187000` | `0x1000` | フラッシュ暗号化は未使用 |
+
+`CONFIG_PARTITION_TABLE_CUSTOM=y`、`CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"`、
+`CONFIG_NVS_ENCRYPTION=y`を`sdkconfig.defaults`へ設定した。NVS暗号化の有効・無効は
+`CONFIG_WEBCAM_NVS_ENCRYPTION`（既定`y`）で切り替える。無効にすると従来どおり
+暗号化なしでNVSを初期化する。`CONFIG_NVS_SEC_KEY_PROTECT_NONE=y`とし、鍵の読み書きは
+`main/nvs_boot.c`が`nvs_keys`パーティションを直接扱う（`nvs_sec_provider`の既定方式は使わない）。
+この構成では`nvs_flash_init()`を直接呼ばず、アプリのNVS初期化は必ず`nvs_boot_init()`を通す。
+
+起動時の処理は次のとおり。
+
+1. `nvs_keys`パーティションを探す。見つからなければ警告を出し、暗号化なしで起動する。
+2. `nvs_flash_read_security_cfg`で鍵を読む。空なら`nvs_flash_generate_keys`で生成する。
+3. `nvs_flash_secure_init`で`nvs`を暗号化して初期化する。
+4. 鍵が壊れている、または暗号化初期化に失敗した場合は、警告を出して暗号化なしへフォールバックする。
+5. `ESP_ERR_NVS_NO_FREE_PAGES`と`ESP_ERR_NVS_NEW_VERSION_FOUND`は従来どおり
+   `nvs_flash_erase`後に再試行する。
+
+**既存の暗号化なし端末を更新する場合**
+
+暗号化へ切り替えると、既存の平文NVSはそのままでは読めない。更新前に
+Web Serialの設定値（Wi-Fi、IdP、Firebase、edgeDeviceId）を控え、次のいずれかで
+NVSを消去してから書き込み、再プロビジョニングする。
+
+```sh
+idf.py -p <PORT> erase-flash
+python -m esptool --chip esp32s3 --port <PORT> erase-flash
+```
+
+シリアルフラッシャーを使う場合も`--erase`相当の全消去を行う。`nvs_keys`だけを
+個別に消去してはいけない。鍵を失うと暗号化済みNVSを復号できず、設定・トークンが
+失われる。`idf.py flash`は通常、消去を伴わないため、暗号化へ切り替える最初の
+書き込みでは全消去を明示する。暗号化済みの端末で`CONFIG_WEBCAM_NVS_ENCRYPTION`を
+無効にする場合も、同様に全消去と再プロビジョニングが必要になる。
+
+このファームウェアはフラッシュ暗号化を有効にしていないため、`nvs_keys`には
+`encrypted`フラグを付けていない。フラッシュ暗号化無効のまま`encrypted`を付けると、
+IDFが鍵のCRCを暗号化書き込みし、通常の読み出しと一致せずNVS暗号化を再起動後に
+初期化できなくなるためだ。NVSの内容は暗号化されるが、鍵自体はフラッシュ上に
+平文で残る。フラッシュ全体を物理的に読める攻撃者から鍵を守るには、別途
+フラッシュ暗号化を有効にし、`nvs_keys`を`encrypted`にする必要がある（今回の範囲外）。
+
+NVS暗号化の判定ロジックは`tests/nvs_boot_test.c`でホスト実行できる。
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -I esp_webcam/main \
+  esp_webcam/tests/nvs_boot_test.c esp_webcam/main/nvs_boot_values.c \
+  -o /tmp/nvs_boot_test
+/tmp/nvs_boot_test
+```
+
+DockerのESP-IDF v6.1（`espressif/idf:v6.1`）でビルドに成功した（app 1,428,736 bytes、
+0x15cd00、factory 0x177000に対して7%空き）。実機への書き込み、暗号化NVSの生成・
+再起動後の読み出しは未検証。
+
 ## IP表示・簡易疎通確認（2026-11-02追加）
 
 | コマンド | 確認内容 |
@@ -161,7 +230,8 @@ SSIDは1～32バイト。パスワードは空、8～63バイト、または64�
 Backspaceで修正、Ctrl-Cで中止できる。長すぎる入力や制御文字を含む行は全体を破棄して保存しない。
 設定は専用NVS名前空間`network`の1つのblobとして保存し、RTC調整値の`rtc_tuning`とは独立する。
 保存済み設定がある場合、menuconfigのWi-Fi・サーバー設定を変えて再ビルドしても保存値を優先する。
-通常の書き込みでは保持され、フラッシュ全消去では失われる。NVS暗号化は本変更では追加していない。
+通常の書き込みでは保持され、フラッシュ全消去では失われる。NVSは既定で暗号化される
+（前節「NVS暗号化とパーティション」を参照）。
 保存方式はESP-IDFの[NVS API](https://github.com/espressif/esp-idf/blob/master/components/nvs_flash/include/nvs.h)に従い、
 `nvs_set_blob`後に`nvs_commit`する。
 

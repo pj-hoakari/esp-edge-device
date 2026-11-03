@@ -173,6 +173,15 @@ viewer-server の HTTP ポーリング経路は非使用。Firestore/Auth のエ
 通常の COM ポート書き込みは `tools/flash_serial.py`、Pico debugprobe は
 `tools/flash_debugprobe.py` を使う。設定・手順は README の「tolo-edge-bridge 接続」と
 `tolo-web/README.md` の「ESP32 カメラを観測ページにつなぐ」を参照する。
+2026-11-03のPhase 11で、8MB用のカスタム`partitions.csv`（`nvs_keys`付き）と
+`main/nvs_boot.c`を追加し、`CONFIG_WEBCAM_NVS_ENCRYPTION`（既定`y`）で
+NVSをXTS-AES暗号化するようにした。鍵が無い・読めない・暗号化初期化に失敗した場合は
+警告を出して暗号化なしへフォールバックする。既存の暗号化なし端末は、全消去して
+再プロビジョニングするまで設定が読めない場合がある。暗号化の詳細、消去手順、
+パーティション表はREADMEの「NVS暗号化とパーティション」を参照する。
+DockerのESP-IDF v6.1でビルド成功（app 1,428,736 bytes、0x15cd00、アプリ領域7%空き）。
+ホストのNVS判定テスト、cloud認証テスト、network設定テスト、シリアルプロトコルテストが成功した。
+実機の書き込み・暗号化NVSの再起動確認は未実施。
 
 作業開始時に実際の構成を確認し、構成変更に合わせてこの文書を更新する。
 

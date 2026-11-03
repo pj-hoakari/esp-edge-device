@@ -1,7 +1,7 @@
 idf_component_register(SRCS "mjpeg_main.c" "main.c" "camera.c" "jpeg_frame.c" "udp_fast.c" "perf.c"
     "network_settings.c" "network_settings_values.c" "wifi_auth.c" "network_diagnostics.c" "network_probes.c"
     "cloud_settings.c" "cloud_settings_values.c" "device_auth.c" "device_auth_values.c"
-    "firebase_client.c" "cloud_signaling.c"
+    "firebase_client.c" "cloud_signaling.c" "nvs_boot.c" "nvs_boot_values.c"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS "../vendor/esp-webrtc-solution/components/esp_peer/src"
     REQUIRES esp_wifi esp_netif nvs_flash esp_http_server esp_http_client esp_peer usb_host_uvc esp_timer mbedtls esp_system esp_hw_support esp_app_format esp_driver_uart wpa_supplicant lwip espressif__cjson
