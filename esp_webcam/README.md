@@ -275,7 +275,25 @@ JSON出力にトークンを含めないことを確認する。`test_serial_pro
 `config`/`status`/`device_authorization`を疑似UARTで実行し、検証エラー、JSONのみの応答、
 Wi-Fiパスワードの非表示、設定保存と再起動を確認する。
 
-2026-11-03のPhase 6変更では、上記の2テストと既存の`network_settings_test.c`が成功した。
+シグナリング経路のトークン再発行順を確認する回帰テストは次のとおり。
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -I esp_webcam/tests/stubs -I esp_webcam/main \
+  -I esp_webcam/managed_components/espressif__cjson/cJSON \
+  esp_webcam/tests/cloud_signaling_test.c esp_webcam/main/cloud_auth_logic.c \
+  esp_webcam/managed_components/espressif__cjson/cJSON/cJSON.c -lm \
+  -o /tmp/cloud_signaling_test
+/tmp/cloud_signaling_test
+```
+
+`cloud_signaling_test`は`cloud_signaling.c`をホスト用スタブとリンクし、
+event_access更新後の再発行で`firebase_refresh`を呼ばないこと、
+IDトークン期限切れ間際は`firebase_refresh`を使うこと、
+Firestore 401/403でカスタムトークンを再発行して同じ要求を1回だけ再試行すること、
+トークン値がログに出ないことを確認する。
+
+2026-11-03のPhase 6変更では、`cloud_auth_test`と`test_serial_protocol.py`、
+既存の`network_settings_test.c`が成功した。
 DockerのESP-IDF v6.1（`espressif/idf:v6.1`）で`idf.py build`が成功し、
 appは1,423,424 bytes（0x15b840）、アプリ領域0x177000に対して0x1b7c0（7%）空き。
 実機の書き込み・Device Authorizationの実IdP接続は未実施。
