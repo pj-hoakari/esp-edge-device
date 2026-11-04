@@ -10,11 +10,81 @@
 #include "cJSON.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "nvs.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "cloud_config";
 static cloud_settings_t active, saved;
+static SemaphoreHandle_t config_lock;
+
+static void wipe(void *data, size_t size);
+
+static bool take_config_lock(void)
+{
+    if (!config_lock) config_lock = xSemaphoreCreateRecursiveMutex();
+    return config_lock && xSemaphoreTakeRecursive(config_lock, portMAX_DELAY) == pdTRUE;
+}
+
+static void give_config_lock(void)
+{
+    if (config_lock) xSemaphoreGiveRecursive(config_lock);
+}
+
+static bool same_identity(const cloud_settings_t *a, const cloud_settings_t *b)
+{
+    return !strcmp(a->edge_device_id, b->edge_device_id) &&
+        !strcmp(a->idp_url, b->idp_url) &&
+        !strcmp(a->firebase_project_id, b->firebase_project_id) &&
+        !strcmp(a->firebase_api_key, b->firebase_api_key) &&
+        !strcmp(a->firestore_emulator_host, b->firestore_emulator_host) &&
+        !strcmp(a->auth_emulator_host, b->auth_emulator_host);
+}
+
+static void clear_credentials(cloud_settings_t *s)
+{
+    wipe(s->event_access, sizeof(s->event_access));
+    wipe(s->refresh_token, sizeof(s->refresh_token));
+    wipe(s->device_code, sizeof(s->device_code));
+    wipe(s->user_code, sizeof(s->user_code));
+    wipe(s->verification_uri, sizeof(s->verification_uri));
+    s->authorization_state = CLOUD_AUTH_NONE;
+    s->token_state = CLOUD_TOKEN_STATE_NONE;
+    s->refresh_in_progress = 0;
+    s->event_access_expires_at = 0;
+    s->event_access_obtained_at = 0;
+    s->event_access_expires_in = 0;
+    s->refresh_token_expires_at = 0;
+    s->grant_expires_at = 0;
+    s->device_code_expires_at = 0;
+    s->poll_interval_s = 0;
+    s->tenant_id[0] = 0;
+    s->event_id[0] = 0;
+    s->token_type[0] = 0;
+}
+
+static void copy_credentials(cloud_settings_t *to, const cloud_settings_t *from)
+{
+    memcpy(to->event_access, from->event_access, sizeof(to->event_access));
+    memcpy(to->refresh_token, from->refresh_token, sizeof(to->refresh_token));
+    memcpy(to->token_type, from->token_type, sizeof(to->token_type));
+    memcpy(to->tenant_id, from->tenant_id, sizeof(to->tenant_id));
+    memcpy(to->event_id, from->event_id, sizeof(to->event_id));
+    to->event_access_expires_at = from->event_access_expires_at;
+    to->event_access_obtained_at = from->event_access_obtained_at;
+    to->event_access_expires_in = from->event_access_expires_in;
+    to->refresh_token_expires_at = from->refresh_token_expires_at;
+    to->grant_expires_at = from->grant_expires_at;
+    to->authorization_state = from->authorization_state;
+    to->token_state = from->token_state;
+    to->refresh_in_progress = from->refresh_in_progress;
+    memcpy(to->device_code, from->device_code, sizeof(to->device_code));
+    memcpy(to->user_code, from->user_code, sizeof(to->user_code));
+    memcpy(to->verification_uri, from->verification_uri, sizeof(to->verification_uri));
+    to->device_code_expires_at = from->device_code_expires_at;
+    to->poll_interval_s = from->poll_interval_s;
+}
 
 static void wipe(void *data, size_t size)
 {
@@ -167,24 +237,48 @@ static bool write_blob(const cloud_settings_t *settings)
 
 bool cloud_settings_save(const cloud_settings_t *settings)
 {
-    if (!cloud_settings_valid(settings)) return false;
-    if (!write_blob(settings)) return false;
-    saved = *settings;
-    return true;
+    if (!take_config_lock()) return false;
+    bool ok = cloud_settings_valid(settings) && write_blob(settings);
+    if (ok) saved = *settings;
+    give_config_lock();
+    return ok;
+}
+
+bool cloud_settings_save_config(cloud_settings_t *settings)
+{
+    if (!settings || !take_config_lock()) return false;
+    if (!cloud_settings_valid(settings)) {
+        give_config_lock();
+        return false;
+    }
+    if (same_identity(settings, &active)) {
+        copy_credentials(settings, &active);
+    } else {
+        clear_credentials(settings);
+    }
+    bool ok = write_blob(settings);
+    if (ok) saved = *settings;
+    give_config_lock();
+    return ok;
 }
 
 bool cloud_settings_store(const cloud_settings_t *settings)
 {
-    if (!cloud_settings_valid(settings)) return false;
-    if (!write_blob(settings)) return false;
-    saved = *settings;
-    active = *settings;
-    return true;
+    if (!take_config_lock()) return false;
+    bool ok = cloud_settings_valid(settings) && write_blob(settings);
+    if (ok) {
+        saved = *settings;
+        active = *settings;
+    }
+    give_config_lock();
+    return ok;
 }
 
 void cloud_settings_activate(const cloud_settings_t *settings)
 {
-    if (settings) active = *settings;
+    if (!settings || !take_config_lock()) return;
+    active = *settings;
+    give_config_lock();
 }
 
 bool cloud_settings_configured(void)

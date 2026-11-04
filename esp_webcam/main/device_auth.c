@@ -33,10 +33,12 @@ static const char *TAG = "device_auth";
 static SemaphoreHandle_t lock;
 static _Atomic(QueueHandle_t) start_requests;
 static int64_t refresh_at_ms;
+static int64_t refresh_retry_at_ms;
 static int64_t next_start_ms;
 static int64_t next_poll_ms;
 static unsigned start_backoff = RETRY_MIN_SECONDS;
 static unsigned poll_backoff = RETRY_MIN_SECONDS;
+static unsigned refresh_backoff = RETRY_MIN_SECONDS;
 
 static void wipe(void *data, size_t size)
 {
@@ -443,6 +445,7 @@ static bool refresh_locked(bool force)
         print_error("authorization_required");
         return false;
     }
+    if (refresh_retry_at_ms && mono_ms() < refresh_retry_at_ms) return false;
     if (!force && refresh_at_ms && mono_ms() < refresh_at_ms) return true;
     if (!cloud_idp_url_valid(current->idp_url)) {
         print_error("idp_url is not configured");
@@ -520,6 +523,8 @@ static bool refresh_locked(bool force)
             return false;
         }
         schedule_refresh();
+        refresh_retry_at_ms = 0;
+        reset_backoff(&refresh_backoff);
         ESP_LOGI(TAG, "event_access refreshed: tenant=%s event=%s",
                  next.tenant_id, next.event_id);
         wipe(&next, sizeof(next));
@@ -529,6 +534,8 @@ static bool refresh_locked(bool force)
 
     if (result == DEVICE_AUTH_INVALID_GRANT || result == DEVICE_AUTH_EXPIRED ||
         result == DEVICE_AUTH_DENIED) {
+        refresh_retry_at_ms = 0;
+        reset_backoff(&refresh_backoff);
         peer_authorization_revoke();
         device_auth_state_reapproval(&next);
         cloud_settings_store(&next);
@@ -542,8 +549,8 @@ static bool refresh_locked(bool force)
 
     next.refresh_in_progress = 0;
     cloud_settings_store(&next);
-    unsigned wait = grow_backoff(&poll_backoff);
-    next_poll_ms = mono_ms() + (int64_t)wait * 1000;
+    unsigned wait = grow_backoff(&refresh_backoff);
+    refresh_retry_at_ms = mono_ms() + (int64_t)wait * 1000;
     ESP_LOGW(TAG, "token refresh failed; retrying in %us", wait);
     print_error("token refresh failed");
     wipe(&next, sizeof(next));
@@ -635,7 +642,7 @@ bool device_auth_ensure_access(void)
         poll_locked();
         current = cloud_settings_active();
         ok = current->authorization_state == CLOUD_AUTH_APPROVED &&
-            current->event_access[0];
+            current->event_access[0] && !token_expired(now);
         if (ok) peer_authorization_allow();
         give_lock();
         return ok;
@@ -657,7 +664,7 @@ bool device_auth_ensure_access(void)
         }
         current = cloud_settings_active();
         ok = current->authorization_state == CLOUD_AUTH_APPROVED &&
-            current->event_access[0];
+            current->event_access[0] && !token_expired(now);
         if (ok) peer_authorization_allow();
         give_lock();
         return ok;
@@ -681,7 +688,7 @@ bool device_auth_ensure_access(void)
 
     current = cloud_settings_active();
     ok = current->authorization_state == CLOUD_AUTH_APPROVED &&
-        current->event_access[0];
+        current->event_access[0] && !token_expired(now);
     if (ok) peer_authorization_allow();
     give_lock();
     return ok;

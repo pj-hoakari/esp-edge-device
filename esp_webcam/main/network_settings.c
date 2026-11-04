@@ -99,6 +99,7 @@ void network_settings_load(void)
 }
 
 const network_settings_t *network_settings_active(void) { return &active; }
+const network_settings_t *network_settings_saved(void) { return &saved; }
 
 static bool write_settings(const network_settings_t *next)
 {
@@ -336,7 +337,7 @@ static void configure_cloud(void)
     snprintf(next.auth_emulator_host, sizeof(next.auth_emulator_host), "%s", auth);
     if (!next.idp_url[0] || !cloud_idp_url_valid(next.idp_url) || !cloud_settings_valid(&next)) {
         puts("Invalid cloud settings. Edge ID must be 16 lowercase hex; IdP must be an HTTP(S) origin; project/API key are required; hosts are host[:port] or empty.");
-    } else if (cloud_settings_save(&next)) {
+    } else if (cloud_settings_save_config(&next)) {
         puts("Cloud settings saved. Reboot to start device authorization.");
     } else {
         puts("Cloud settings save failed.");
@@ -471,7 +472,8 @@ static void json_config(const cJSON *root)
     snprintf(net.password, sizeof(net.password), "%s", password);
     bool signaling_ok = signaling[0] &&
         network_signaling_normalize(signaling, net.signaling_url, sizeof(net.signaling_url));
-    cloud_settings_t cloud = {.version = CLOUD_SETTINGS_VERSION};
+    cloud_settings_t cloud = *cloud_settings_active();
+    cloud.version = CLOUD_SETTINGS_VERSION;
     snprintf(cloud.edge_device_id, sizeof(cloud.edge_device_id), "%s", edge);
     snprintf(cloud.firebase_project_id, sizeof(cloud.firebase_project_id), "%s", project);
     snprintf(cloud.firebase_api_key, sizeof(cloud.firebase_api_key), "%s", key);
@@ -481,13 +483,17 @@ static void json_config(const cJSON *root)
     bool cloud_ok = idp[0] && cloud_idp_url_valid(idp) && cloud_settings_valid(&cloud);
 
     bool ok = false;
+    network_settings_t previous_net = *network_settings_saved();
     if (!signaling_ok) {
         json_config_result(false, "invalid_signaling_url");
     } else if (!cloud_ok) {
         json_config_result(false, "invalid_cloud_settings");
     } else if (!network_settings_save(&net)) {
         json_config_result(false, "save_failed");
-    } else if (!cloud_settings_save(&cloud)) {
+    } else if (!cloud_settings_save_config(&cloud)) {
+        /* Best-effort rollback; a power loss between the two commits is still
+         * possible because NVS has no cross-namespace transaction. */
+        network_settings_save(&previous_net);
         json_config_result(false, "save_failed");
     } else {
         json_config_result(true, NULL);

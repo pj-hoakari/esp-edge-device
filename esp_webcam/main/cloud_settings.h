@@ -95,6 +95,8 @@ bool cloud_settings_valid(const cloud_settings_t *settings);
 bool cloud_settings_apply_token(cloud_settings_t *settings, const char *token);
 /* Saves the profile for the next boot. Does not change the active profile. */
 bool cloud_settings_save(const cloud_settings_t *settings);
+/* Saves configuration fields while preserving current credentials if identity is unchanged. */
+bool cloud_settings_save_config(cloud_settings_t *settings);
 /* Saves and makes the profile active immediately (used for tokens). */
 bool cloud_settings_store(const cloud_settings_t *settings);
 /* Updates only the in-memory profile, for fail-closed state when NVS fails. */

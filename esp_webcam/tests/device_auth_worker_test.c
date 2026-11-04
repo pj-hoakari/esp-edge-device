@@ -36,7 +36,8 @@ int xQueueReceive(QueueHandle_t q, void *item, unsigned ticks) {
 SemaphoreHandle_t xSemaphoreCreateRecursiveMutex(void) { return (void *)1; }
 int xSemaphoreTakeRecursive(SemaphoreHandle_t s, unsigned ticks) { return pdTRUE; }
 int xSemaphoreGiveRecursive(SemaphoreHandle_t s) { return pdTRUE; }
-int64_t esp_timer_get_time(void) { return 1000000; }
+static int64_t mock_time_us = 1000000;
+int64_t esp_timer_get_time(void) { return mock_time_us; }
 int esp_crt_bundle_attach(void *config) { return 0; }
 const char *esp_err_to_name(int error) { return "mock"; }
 esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *c) {
@@ -102,13 +103,27 @@ int auth_worker_test(void) {
     assert(peer_authorization_blocked()); /* consumption cannot resume video */
 
     approved();
-    active.grant_expires_at = time(NULL) - 1;
+    reply = "{}"; http_status = 500;
     int before = requests;
+    assert(!device_auth_force_refresh());
+    assert(requests == before + 1);
+    before = requests;
+    assert(!device_auth_force_refresh());
+    assert(requests == before); /* backoff suppresses the immediate retry */
+    mock_time_us += 10 * 1000 * 1000;
+    assert(!device_auth_force_refresh());
+    assert(requests == before + 1);
+    reply = "{\"error\":\"invalid_grant\"}";
+
+    approved();
+    active.grant_expires_at = time(NULL) - 1;
+    before = requests;
     assert(!device_auth_ensure_access());
     assert(requests == before && peer_authorization_take_disconnect());
     assert(peer_authorization_blocked());
 
     approved();
+    mock_time_us += 300 * 1000 * 1000; /* clear the previous network backoff */
     fail_on_store = store_calls + 2; /* marker succeeds, revocation save fails */
     assert(!device_auth_force_refresh());
     fail_on_store = 0;

@@ -7,6 +7,18 @@
 
 static const char *TAG = "nvs_boot";
 
+static esp_err_t plain_init_with_retry(void);
+
+static esp_err_t fail_or_plain(esp_err_t cause)
+{
+#if CONFIG_WEBCAM_NVS_REQUIRE_ENCRYPTION
+    ESP_LOGE(TAG, "NVS encryption is required but unavailable; refusing plaintext NVS");
+    return cause == ESP_OK ? ESP_FAIL : cause;
+#else
+    return plain_init_with_retry();
+#endif
+}
+
 static esp_err_t plain_init_with_retry(void)
 {
     /* nvs_flash_init() follows CONFIG_NVS_ENCRYPTION and would try the
@@ -51,6 +63,17 @@ static void wipe_cfg(nvs_sec_cfg_t *cfg)
 
 esp_err_t nvs_boot_init(void)
 {
+#if defined(CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC) && CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC
+    /* The NVS security provider derives the keys from an eFuse HMAC key.
+     * Do not read the legacy plaintext nvs_keys partition in this profile. */
+    esp_err_t hmac_err = nvs_flash_init();
+    if (hmac_err == ESP_OK) {
+        ESP_LOGI(TAG, "NVS is encrypted with the eFuse HMAC key");
+        return ESP_OK;
+    }
+    ESP_LOGE(TAG, "HMAC-backed NVS init failed (%s)", esp_err_to_name(hmac_err));
+    return fail_or_plain(hmac_err);
+#else
     const esp_partition_t *keys = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS_KEYS, NULL);
     nvs_sec_cfg_t cfg = {0};
@@ -65,10 +88,9 @@ esp_err_t nvs_boot_init(void)
         ESP_LOGW(TAG, "NVS key partition is blank; generating encryption keys");
         err = nvs_flash_generate_keys(keys, &cfg);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Could not generate NVS keys (%s); using unencrypted NVS",
-                     esp_err_to_name(err));
+            ESP_LOGE(TAG, "Could not generate NVS keys (%s)", esp_err_to_name(err));
             wipe_cfg(&cfg);
-            return plain_init_with_retry();
+            return fail_or_plain(err);
         }
         /* fall through */
     case NVS_BOOT_SECURE_EXISTING:
@@ -78,10 +100,8 @@ esp_err_t nvs_boot_init(void)
             ESP_LOGI(TAG, "NVS is encrypted");
             return ESP_OK;
         }
-        ESP_LOGE(TAG, "Encrypted NVS init failed (%s); using unencrypted NVS. "
-                 "Erase flash and reprovision to enable NVS encryption.",
-                 esp_err_to_name(err));
-        return plain_init_with_retry();
+        ESP_LOGE(TAG, "Encrypted NVS init failed (%s)", esp_err_to_name(err));
+        return fail_or_plain(err);
     case NVS_BOOT_PLAIN:
     default:
         if (!keys) {
@@ -93,8 +113,9 @@ esp_err_t nvs_boot_init(void)
                      esp_err_to_name(read_err));
         }
         wipe_cfg(&cfg);
-        return plain_init_with_retry();
+        return fail_or_plain(read_err);
     }
+#endif
 }
 
 #else

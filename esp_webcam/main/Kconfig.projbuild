@@ -29,6 +29,15 @@ config WEBCAM_NVS_ENCRYPTION
         Disable this to initialize NVS without encryption. A device that
         already holds encrypted NVS must be erased and reprovisioned when this
         option is changed.
+config WEBCAM_NVS_REQUIRE_ENCRYPTION
+    bool "Fail closed when NVS encryption is unavailable"
+    default n
+    depends on WEBCAM_NVS_ENCRYPTION
+    help
+        Stop boot if NVS encryption cannot be initialized instead of falling
+        back to plaintext. Enable this in production/secure builds. The
+        secure configuration uses an HMAC key burnt in eFuse; see
+        sdkconfig.secure.defaults and the README.
 config WEBCAM_CAMERA_FPS
     int "UVC capture FPS (10 or 15 for 1280x720)"
     range 6 30

@@ -110,12 +110,28 @@ python -m esptool --chip esp32s3 --port <PORT> erase-flash
 書き込みでは全消去を明示する。暗号化済みの端末で`CONFIG_WEBCAM_NVS_ENCRYPTION`を
 無効にする場合も、同様に全消去と再プロビジョニングが必要になる。
 
-このファームウェアはフラッシュ暗号化を有効にしていないため、`nvs_keys`には
-`encrypted`フラグを付けていない。フラッシュ暗号化無効のまま`encrypted`を付けると、
-IDFが鍵のCRCを暗号化書き込みし、通常の読み出しと一致せずNVS暗号化を再起動後に
-初期化できなくなるためだ。NVSの内容は暗号化されるが、鍵自体はフラッシュ上に
-平文で残る。フラッシュ全体を物理的に読める攻撃者から鍵を守るには、別途
-フラッシュ暗号化を有効にし、`nvs_keys`を`encrypted`にする必要がある（今回の範囲外）。
+このファームウェアの既定ビルドはフラッシュ暗号化を有効にしていないため、
+`nvs_keys`には`encrypted`フラグを付けていない。フラッシュ暗号化無効のまま
+`encrypted`を付けると、IDFが鍵のCRCを暗号化書き込みし、通常の読み出しと一致せず
+NVS暗号化を再起動後に初期化できなくなるためだ。既定ビルドではNVSの内容は暗号化されるが、
+鍵自体はフラッシュ上に平文で残る。これは開発・互換用であり、物理読み出しに対する
+資格情報保護にはならない。
+
+本番・セキュアビルドでは `sdkconfig.secure.defaults` を使い、ESP32-S3のeFuse HMAC鍵から
+NVS鍵を導出する。HMAC鍵を先にバーンし、`CONFIG_WEBCAM_NVS_REQUIRE_ENCRYPTION=y` で
+平文フォールバックを禁止する。
+
+```sh
+# 例: eFuse key block 0 に HMAC_UP 用途の鍵を書き込む（値は安全に保管する）
+idf.py efuse-burn-key 0 <hmac-key-hex> HMAC_UP
+idf.py -B build-secure -DSDKCONFIG=build-secure/sdkconfig -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.secure.defaults" build
+idf.py -B build-secure -p <PORT> flash
+```
+
+eFuseはやり直せない。既存の平文NVS端末をセキュアビルドへ移す場合は、設定を控えて
+全消去・再プロビジョニングする。HMAC鍵が未設定の端末では、暗号化必須ビルドは
+平文へ降格せず起動を停止する。`sdkconfig.secure.defaults` は開発用の既定ビルドとは
+別のビルドディレクトリを使ってください。
 
 NVS暗号化の判定ロジックは`tests/nvs_boot_test.c`でホスト実行できる。
 

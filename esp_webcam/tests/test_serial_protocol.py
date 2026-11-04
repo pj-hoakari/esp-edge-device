@@ -105,6 +105,7 @@ bool cloud_settings_save(const cloud_settings_t *s) {
     if (!cloud_settings_valid(s)) return false;
     saved_cloud = *s; cloud_saves++; return true;
 }
+bool cloud_settings_save_config(cloud_settings_t *s) { return cloud_settings_save(s); }
 bool cloud_settings_store(const cloud_settings_t *s) { if (!cloud_settings_save(s)) return false; active_cloud = *s; return true; }
 bool cloud_settings_apply_token(cloud_settings_t *s, const char *token) { return false; }
 bool cloud_settings_configured(void) {
