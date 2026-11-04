@@ -746,3 +746,34 @@ ESPへ届いていない。LAN外はTURN/STUN等の追加設計が必要。
 - [USB Host / PHY共有制約](https://docs.espressif.com/projects/esp-usb/en/latest/esp32s3/usb_host.html#external-phy-configuration)。
 
 基板・回路図は変更していないためERC/DRCは今回のソフトウェア変更では実行しない。
+
+### 2026-11-04: 認可処理とHTTPSの回帰修正
+
+Web Serialの`device_authorization`は長さ1のキューへ要求を入れて直ちに戻る。
+HTTP/TLS・認可処理・user_codeのJSON出力はcloudタスクで行う。
+キュー満杯またはcloudワーカー未起動なら、JSONエラー
+`authorization_queue_full_or_unavailable`を返す。認可開始の大きな作業領域はヒープへ置く。
+
+Refreshの`invalid_grant`、grant期限切れ、再承認が必要な状態では、送信をブロックして
+peerタスクへ切断を通知する。peerタスクが接続を閉じ、送信途中のJPEG・キュー内のoffer・
+保留answerを破棄する。認可タスクからpeer APIは呼ばない。再承認後はFirebaseセッションと
+SDPを引き継がず、新しい接続を待つ。
+
+`CONFIG_WEBCAM_ALLOW_INSECURE_HTTP`の既定値は`n`。
+IdP・Edge Bridge・Firestore/Auth emulatorはHTTPS URLを設定する。
+既存NVSやKconfigにHTTP設定が残っていても、資格情報送信の直前に拒否する。
+裸のemulatorホストやsignalingホストもHTTP扱いなので拒否する。
+ローカル開発でHTTPが必要な場合だけmenuconfigでこのフラグを明示的に有効にする。
+HTTPではRefresh Tokenも平文になる。HTTPSからHTTPへの自動リダイレクトは行わない。
+
+次のコマンドで主要ホスト回帰テストを実行する（C11対応`cc`とPython 3が必要）。
+
+```bash
+python3 esp_webcam/tests/run_host_tests.py
+```
+
+cloud_auth・network_settingsは本番用と開発用の両設定で実行する。
+追加テストは実際のdevice_auth/Firebase HTTP入口とpeerループをホスト用アダプターで動かし、
+キュー経由の開始・満杯エラー・user_codeの出力回数・invalid_grant時の送信停止とSDP破棄・
+NVS保存失敗時の失効・grant期限切れ・HTTP拒否／開発ビルド時のみ許可を確認する。
+実機でのWeb Serial操作、TLS時のスタック余裕、再承認後の映像再接続は別途確認が必要。

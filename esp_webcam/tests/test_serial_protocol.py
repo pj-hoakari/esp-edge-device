@@ -116,11 +116,9 @@ const char *cloud_authorization_name(const cloud_settings_t *s) {
     return "required";
 }
 void cloud_settings_show(const char *label, const cloud_settings_t *s) { }
-bool device_auth_start(void) {
+bool device_auth_request_start(void) {
     device_auth_starts++;
-    puts("{\"type\":\"device_authorization\",\"user_code\":\"ABCD-EFGH\","
-         "\"verification_uri\":\"https://idp.example/device\",\"expires_in\":600}");
-    return true;
+    return device_auth_starts == 1;
 }
 '''
 
@@ -164,6 +162,8 @@ int main(void) {
     run_json("{\"type\":\"nonsense\"}\n");
     run_json("{\"type\":\"device_authorization\"}\n");
     assert(device_auth_starts == 1);
+    run_json("{\"type\":\"device_authorization\"}\n");
+    assert(device_auth_starts == 2);
 
     const char *valid =
         "{\"type\":\"config\",\"version\":1,\"wifi_ssid\":\"reception\","
@@ -171,6 +171,24 @@ int main(void) {
         "\"idp_url\":\"https://idp.example\",\"firebase_project_id\":\"project-1\","
         "\"firebase_api_key\":\"api-key-1\",\"firestore_emulator_host\":\"\","
         "\"firebase_auth_emulator_host\":\"\",\"edge_device_id\":\"0123456789abcdef\"}\n";
+#if !defined(CONFIG_WEBCAM_ALLOW_INSECURE_HTTP) || !CONFIG_WEBCAM_ALLOW_INSECURE_HTTP
+    /* Exercise the production config command, not just its URL helper. */
+    cJSON *insecure = cJSON_Parse(valid);
+    assert(insecure);
+    cJSON_ReplaceItemInObjectCaseSensitive(insecure, "idp_url", cJSON_CreateString("http://idp.example"));
+    char rejected[2048];
+    char *encoded = cJSON_PrintUnformatted(insecure);
+    snprintf(rejected, sizeof(rejected), "%s\n", encoded); free(encoded);
+    run_json(rejected);
+    assert(cloud_saves == 0 && commits == 0);
+    cJSON_ReplaceItemInObjectCaseSensitive(insecure, "idp_url", cJSON_CreateString("https://idp.example"));
+    cJSON_ReplaceItemInObjectCaseSensitive(insecure, "signaling_url", cJSON_CreateString("http://bridge.example"));
+    encoded = cJSON_PrintUnformatted(insecure);
+    snprintf(rejected, sizeof(rejected), "%s\n", encoded); free(encoded);
+    cJSON_Delete(insecure);
+    run_json(rejected);
+    assert(cloud_saves == 0 && commits == 0);
+#endif
     if (!setjmp(rebooted)) {
         char line[2048];
         rx = (const unsigned char *)valid;
@@ -191,7 +209,7 @@ int main(void) {
 '''
 
 
-def main():
+def run(development):
     project = Path(__file__).resolve().parents[1]
     temp_root = (project / '.tools').resolve()
     temp_root.mkdir(exist_ok=True)
@@ -206,12 +224,17 @@ def main():
             header.parent.mkdir(parents=True, exist_ok=True)
             header.write_text('#include "mock.h"\n', encoding='utf-8')
         unit = temp / 'serial_test.c'
+        test = TEST
+        if not development:
+            test = test.replace('http://10.1.2.3:8787', 'https://10.1.2.3:8787')
+            test = test.replace(r'\"signaling_url\":\"10.1.2.3:8787\"',
+                                r'\"signaling_url\":\"https://10.1.2.3:8787\"')
         unit.write_text('#include "mock.h"\n#include "' + (project / 'main/network_settings.c').as_posix() +
-                        '"\n' + TEST, encoding='utf-8')
+                        '"\n' + test, encoding='utf-8')
         exe = temp / 'serial_test'
         cjson = project / 'managed_components/espressif__cjson/cJSON'
         compilation = subprocess.run(
-            ['cc', '-std=c11', '-Wall', '-Wextra', '-O1', '-I' + str(temp),
+            ['cc', *(['-DCONFIG_WEBCAM_ALLOW_INSECURE_HTTP=1'] if development else []), '-std=c11', '-Wall', '-Wextra', '-O1', '-I' + str(temp),
              '-I' + str(project / 'main'), '-I' + str(cjson),
              '-o', str(exe), str(unit),
              str(project / 'main/network_settings_values.c'),
@@ -236,9 +259,11 @@ def main():
             assert isinstance(parsed, dict) and isinstance(parsed.get('type'), str)
         assert any(json.loads(line)['type'] == 'config_result' for line in lines)
         assert any(json.loads(line).get('type') == 'status' for line in lines)
-        assert any(json.loads(line).get('type') == 'device_authorization' for line in lines)
+        assert not any(json.loads(line).get('type') == 'device_authorization' for line in lines)
+        assert any(json.loads(line).get('error') == 'authorization_queue_full_or_unavailable' for line in lines)
         print('Serial protocol passed: JSON-only responses, validation, redaction, reboot.')
 
 
 if __name__ == '__main__':
-    main()
+    run(False)
+    run(True)

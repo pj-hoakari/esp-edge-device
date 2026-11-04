@@ -1,4 +1,12 @@
 menu "ESP webcam"
+config WEBCAM_ALLOW_INSECURE_HTTP
+    bool "Allow credential transmission over HTTP (development only)"
+    default n
+    help
+        Permit HTTP IdP, Edge Bridge and Firebase emulator endpoints only
+        for isolated development. HTTP exposes access and refresh tokens.
+        Production builds require HTTPS, including saved NVS endpoints.
+
 config WEBCAM_WIFI_SSID
     string "Wi-Fi SSID (local sdkconfig only)"
     default ""
@@ -55,7 +63,8 @@ config WEBCAM_SIGNALING_URL
         command, then reboot, to change the server without rebuilding.
         Base URL of tolo-edge-bridge. The ESP calls IssueFirestoreToken and
         then reads/writes the Firestore signaling documents. Use an address
-        the ESP can reach. http:// defaults to port 8080 and https:// to 443.
+        the ESP can reach. Production builds require HTTPS. HTTP and bare
+        hosts are accepted only with WEBCAM_ALLOW_INSECURE_HTTP enabled.
         HTTPS validates the server with the ESP-IDF CA bundle. Leave empty to
         run the MJPEG diagnostics without WebRTC.
 config WEBCAM_EDGE_DEVICE_ID
@@ -70,7 +79,8 @@ config WEBCAM_IDP_URL
     help
         Base URL of the IdP issuer, for example https://auth.example.com.
         The ESP calls /oauth2/device_authorization and /oauth2/token on this
-        origin. Must be an HTTP(S) origin with no path or trailing slash.
+        origin. Must be an HTTPS origin with no path or trailing slash.
+        HTTP is allowed only with WEBCAM_ALLOW_INSECURE_HTTP enabled.
         Web Serial provisioning normally supplies this value.
 config WEBCAM_FIREBASE_PROJECT_ID
     string "Firebase project ID"

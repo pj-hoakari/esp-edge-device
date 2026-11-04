@@ -42,33 +42,6 @@ static bool hex16(const char *text)
     return true;
 }
 
-static const char *without_scheme(const char *text)
-{
-    if (!strncmp(text, "https://", 8)) return text + 8;
-    if (!strncmp(text, "http://", 7)) return text + 7;
-    return text;
-}
-
-/* Emulator endpoint: empty (production), host[:port], http://host[:port], or
- * https://host[:port]. A path is not allowed; the REST paths are added later. */
-static bool emulator_host(const char *text)
-{
-    if (!text[0]) return true;
-    if (!printable(text) || strlen(text) >= CLOUD_HOST_SIZE) return false;
-    const char *host = without_scheme(text);
-    if (!host[0] || strchr(host, '/') || strchr(host, ' ') || strchr(host, '?')) return false;
-    const char *colon = strchr(host, ':');
-    if (!colon) return true;
-    if (strchr(colon + 1, ':')) return false;
-    unsigned port = 0;
-    for (const char *p = colon + 1; *p; p++) {
-        if (*p < '0' || *p > '9') return false;
-        port = port * 10 + (unsigned)(*p - '0');
-        if (port > 65535) return false;
-    }
-    return port > 0;
-}
-
 bool cloud_settings_valid(const cloud_settings_t *s)
 {
     return s->version == CLOUD_SETTINGS_VERSION &&
@@ -90,8 +63,8 @@ bool cloud_settings_valid(const cloud_settings_t *s)
         (!s->idp_url[0] || cloud_idp_url_valid(s->idp_url)) &&
         s->firebase_project_id[0] && printable(s->firebase_project_id) &&
         s->firebase_api_key[0] && printable(s->firebase_api_key) &&
-        emulator_host(s->firestore_emulator_host) &&
-        emulator_host(s->auth_emulator_host) &&
+        cloud_emulator_host_valid(s->firestore_emulator_host) &&
+        cloud_emulator_host_valid(s->auth_emulator_host) &&
         s->authorization_state <= CLOUD_AUTH_REAPPROVAL_REQUIRED &&
         s->token_state <= CLOUD_TOKEN_STATE_REJECTED &&
         s->refresh_in_progress <= 1 &&

@@ -1,4 +1,5 @@
 #include "cloud_settings_values.h"
+#include "credential_transport.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,7 +21,7 @@ static bool host_label_char(char c)
 
 bool cloud_idp_url_valid(const char *url)
 {
-    if (!url || !url[0]) return false;
+    if (!credential_url_allowed(url)) return false;
     const char *host;
     if (!strncmp(url, "https://", 8)) host = url + 8;
     else if (!strncmp(url, "http://", 7)) host = url + 7;
@@ -62,6 +63,17 @@ bool cloud_idp_url_valid(const char *url)
         if (!port || port > 65535) return false;
     }
     return true;
+}
+
+bool cloud_emulator_host_valid(const char *host)
+{
+    if (!host) return false;
+    if (!host[0]) return true;
+    if (strlen(host) >= CLOUD_HOST_SIZE) return false;
+    if (strstr(host, "://")) return cloud_idp_url_valid(host);
+    char url[CLOUD_HOST_SIZE + 8];
+    snprintf(url, sizeof(url), "http://%s", host);
+    return cloud_idp_url_valid(url);
 }
 
 bool cloud_settings_migrate(const void *blob, size_t size, cloud_settings_t *out)

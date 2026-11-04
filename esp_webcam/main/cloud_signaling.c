@@ -296,6 +296,7 @@ static void cloud_task(void *arg)
         return;
     }
 
+    device_auth_worker_initialize();
     ESP_LOGI(TAG, "cloud task started");
     char target[SESSION_ID_SIZE] = {0};
     char target_created[CREATED_AT_SIZE] = {0};
@@ -314,7 +315,20 @@ static void cloud_task(void *arg)
     bool reported_reapproval = false;
 
     for (;;) {
+        device_auth_process_requests();
         if (!device_auth_ensure_access()) {
+            /* Never resume a previous identity's Firebase session or SDP after
+             * reapproval. The peer task owns closing its own connection. */
+            wipe(&session, sizeof(session));
+            if (target_created[0])
+                memcpy(handled_created, target_created, sizeof(handled_created));
+            target[0] = 0;
+            target_created[0] = 0;
+            offer_submitted = false;
+            answer_written = false;
+            was_active = false;
+            if (write_sdp) { wipe(write_sdp, strlen(write_sdp)); free(write_sdp); write_sdp = NULL; }
+
             if (settings->authorization_state == CLOUD_AUTH_REAPPROVAL_REQUIRED) {
                 if (!reported_reapproval) {
                     printf("{\"type\":\"error\",\"error\":\"authorization_required\"}\n");

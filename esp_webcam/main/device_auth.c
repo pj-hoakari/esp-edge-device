@@ -1,6 +1,9 @@
 #include "device_auth.h"
+#include "credential_transport.h"
+#include "peer_authorization.h"
 
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -15,6 +18,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
 
 static const char *TAG = "device_auth";
 
@@ -27,6 +31,7 @@ static const char *TAG = "device_auth";
 #define TOKEN_REFRESH_PERCENT 75
 
 static SemaphoreHandle_t lock;
+static _Atomic(QueueHandle_t) start_requests;
 static int64_t refresh_at_ms;
 static int64_t next_start_ms;
 static int64_t next_poll_ms;
@@ -119,12 +124,15 @@ static void print_start(const device_auth_start_t *start)
 static int http_post_form(const char *url, const char *body, char *out, size_t out_size,
                           int *status)
 {
+    *status = 0;
+    if (!credential_url_allowed(url)) return -1;
     esp_http_client_config_t config = {
         .url = url,
         .timeout_ms = IDP_HTTP_TIMEOUT_MS,
         .buffer_size = 4096,
         .buffer_size_tx = 2048,
         .keep_alive_enable = false,
+        .disable_auto_redirect = true,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -215,75 +223,74 @@ static bool token_expired(int64_t now)
 
 static bool start_locked(void)
 {
+    /* TLS runs on cloud_task; keep its large request/profile off that stack. */
+    typedef struct {
+        cloud_settings_t next;
+        device_auth_start_t start;
+        char url[IDP_URL_MAX];
+        char body[IDP_BODY_MAX];
+        char response[IDP_RESPONSE_MAX];
+    } start_work_t;
+    start_work_t *work = calloc(1, sizeof(*work));
+    if (!work) {
+        print_error("no memory for device authorization");
+        return false;
+    }
+    bool ok = false;
     const cloud_settings_t *current = cloud_settings_active();
     int64_t now = wall_now();
     if (current->authorization_state == CLOUD_AUTH_PENDING &&
         (!current->device_code_expires_at || !now ||
          now < current->device_code_expires_at)) {
-        device_auth_start_t pending = {0};
-        snprintf(pending.user_code, sizeof(pending.user_code), "%s", current->user_code);
-        snprintf(pending.verification_uri, sizeof(pending.verification_uri), "%s",
+        snprintf(work->start.user_code, sizeof(work->start.user_code), "%s", current->user_code);
+        snprintf(work->start.verification_uri, sizeof(work->start.verification_uri), "%s",
                  current->verification_uri);
-        pending.expires_in = current->device_code_expires_at > 0 && now > 0 ?
+        work->start.expires_in = current->device_code_expires_at > 0 && now > 0 ?
             current->device_code_expires_at - now : 0;
-        if (pending.expires_in < 0) pending.expires_in = 0;
-        print_start(&pending);
-        wipe(&pending, sizeof(pending));
-        return true;
+        if (work->start.expires_in < 0) work->start.expires_in = 0;
+        ok = true;
+        goto done;
     }
     if (!cloud_idp_url_valid(current->idp_url)) {
         print_error("idp_url is not configured");
-        return false;
+        goto done;
     }
-
-    char url[IDP_URL_MAX];
-    int n = snprintf(url, sizeof(url), "%s/oauth2/device_authorization", current->idp_url);
-    if (n < 0 || (size_t)n >= sizeof(url)) {
+    int n = snprintf(work->url, sizeof(work->url), "%s/oauth2/device_authorization", current->idp_url);
+    if (n < 0 || (size_t)n >= sizeof(work->url)) {
         print_error("idp_url is too long");
-        return false;
+        goto done;
     }
-    char body[IDP_BODY_MAX] = {0};
-    if (!form_append(body, sizeof(body), "client_id", "esp-camera") ||
-        !form_append(body, sizeof(body), "scope", "events.stream")) {
+    if (!form_append(work->body, sizeof(work->body), "client_id", "esp-camera") ||
+        !form_append(work->body, sizeof(work->body), "scope", "events.stream")) {
         print_error("device authorization request is too long");
-        return false;
-    }
-
-    char *response = calloc(1, IDP_RESPONSE_MAX);
-    if (!response) {
-        print_error("no memory for device authorization");
-        return false;
+        goto done;
     }
     int status = 0;
-    int length = http_post_form(url, body, response, IDP_RESPONSE_MAX, &status);
-    device_auth_start_t start = {0};
-    bool ok = length >= 0 && status == 200 &&
-        device_auth_parse_start(response, &start);
-    wipe(response, IDP_RESPONSE_MAX);
-    free(response);
-    if (!ok) {
+    int length = http_post_form(work->url, work->body, work->response,
+                                sizeof(work->response), &status);
+    if (length < 0 || status != 200 ||
+        !device_auth_parse_start(work->response, &work->start)) {
         ESP_LOGW(TAG, "device authorization start failed: HTTP %d", status);
         print_error("device authorization start failed");
-        wipe(&start, sizeof(start));
-        return false;
+        goto done;
     }
-
-    cloud_settings_t next = *cloud_settings_active();
-    device_auth_state_begin(&next, &start, now);
-    if (!cloud_settings_store(&next)) {
+    work->next = *cloud_settings_active();
+    device_auth_state_begin(&work->next, &work->start, now);
+    peer_authorization_revoke();
+    if (!cloud_settings_store(&work->next)) {
         print_error("could not save device authorization");
-        wipe(&next, sizeof(next));
-        wipe(&start, sizeof(start));
-        return false;
+        goto done;
     }
-    next_start_ms = mono_ms() + (int64_t)start.interval * 1000;
+    next_start_ms = mono_ms() + (int64_t)work->start.interval * 1000;
     next_poll_ms = next_start_ms;
     reset_backoff(&start_backoff);
-    ESP_LOGI(TAG, "device authorization pending (%us interval)", (unsigned)start.interval);
-    print_start(&start);
-    wipe(&next, sizeof(next));
-    wipe(&start, sizeof(start));
-    return true;
+    ESP_LOGI(TAG, "device authorization pending (%us interval)", (unsigned)work->start.interval);
+    ok = true;
+done:
+    if (ok) print_start(&work->start);
+    wipe(work, sizeof(*work));
+    free(work);
+    return ok;
 }
 
 static bool poll_locked(void)
@@ -299,6 +306,7 @@ static bool poll_locked(void)
         next.token_state = CLOUD_TOKEN_STATE_NONE;
         cloud_settings_store(&next);
         wipe(&next, sizeof(next));
+        peer_authorization_revoke();
         print_error("expired_token");
         return false;
     }
@@ -350,6 +358,7 @@ static bool poll_locked(void)
     if (result == DEVICE_AUTH_OK) {
         cloud_settings_t next = *cloud_settings_active();
         if (!device_auth_state_approved(&next, &tokens, now)) {
+            peer_authorization_revoke();
             device_auth_state_reapproval(&next);
             cloud_settings_store(&next);
             cloud_settings_activate(&next);
@@ -359,6 +368,7 @@ static bool poll_locked(void)
             return false;
         }
         if (!cloud_settings_store(&next)) {
+            peer_authorization_revoke();
             device_auth_state_reapproval(&next);
             cloud_settings_store(&next);
             cloud_settings_activate(&next);
@@ -405,6 +415,7 @@ static bool poll_locked(void)
         next.token_state = CLOUD_TOKEN_STATE_NONE;
         cloud_settings_store(&next);
         cloud_settings_activate(&next);
+        peer_authorization_revoke();
         print_error(result == DEVICE_AUTH_EXPIRED ? "expired_token" :
                     result == DEVICE_AUTH_DENIED ? "access_denied" : "invalid_grant");
     } else {
@@ -424,6 +435,7 @@ static bool refresh_locked(bool force)
     int64_t now = wall_now();
     if (current->grant_expires_at > 0 && now > 0 && now >= current->grant_expires_at) {
         cloud_settings_t next = *current;
+        peer_authorization_revoke();
         device_auth_state_reapproval(&next);
         cloud_settings_store(&next);
         cloud_settings_activate(&next);
@@ -484,6 +496,7 @@ static bool refresh_locked(bool force)
 
     if (result == DEVICE_AUTH_OK) {
         if (!device_auth_state_approved(&next, &tokens, now)) {
+            peer_authorization_revoke();
             device_auth_state_reapproval(&next);
             cloud_settings_store(&next);
             cloud_settings_activate(&next);
@@ -496,6 +509,7 @@ static bool refresh_locked(bool force)
          * the active profile drops the old one. */
         if (!cloud_settings_store(&next)) {
             cloud_settings_t failed = *current;
+            peer_authorization_revoke();
             device_auth_state_reapproval(&failed);
             cloud_settings_store(&failed);
             cloud_settings_activate(&failed);
@@ -513,7 +527,9 @@ static bool refresh_locked(bool force)
         return true;
     }
 
-    if (result == DEVICE_AUTH_INVALID_GRANT) {
+    if (result == DEVICE_AUTH_INVALID_GRANT || result == DEVICE_AUTH_EXPIRED ||
+        result == DEVICE_AUTH_DENIED) {
+        peer_authorization_revoke();
         device_auth_state_reapproval(&next);
         cloud_settings_store(&next);
         cloud_settings_activate(&next);
@@ -543,6 +559,7 @@ void device_auth_initialize(void)
     bool changed = false;
     if (next.refresh_in_progress) {
         ESP_LOGW(TAG, "refresh was interrupted; reapproval required");
+        peer_authorization_revoke();
         device_auth_state_reapproval(&next);
         changed = true;
     } else if (next.authorization_state == CLOUD_AUTH_PENDING &&
@@ -555,6 +572,7 @@ void device_auth_initialize(void)
                next.grant_expires_at > 0 && now > 0 &&
                now >= next.grant_expires_at) {
         ESP_LOGW(TAG, "device grant expired; reapproval required");
+        peer_authorization_revoke();
         device_auth_state_reapproval(&next);
         changed = true;
     }
@@ -586,6 +604,7 @@ bool device_auth_force_refresh(void)
 {
     if (!take_lock()) return false;
     bool ok = refresh_locked(true);
+    if (ok) peer_authorization_allow();
     give_lock();
     return ok;
 }
@@ -597,7 +616,17 @@ bool device_auth_ensure_access(void)
     bool ok = false;
     int64_t now = wall_now();
 
+    if (current->authorization_state == CLOUD_AUTH_APPROVED &&
+        current->grant_expires_at > 0 && now > 0 && now >= current->grant_expires_at) {
+        peer_authorization_revoke();
+        cloud_settings_t next = *current;
+        device_auth_state_reapproval(&next);
+        cloud_settings_store(&next);
+        cloud_settings_activate(&next);
+        wipe(&next, sizeof(next));
+    }
     if (current->authorization_state == CLOUD_AUTH_REAPPROVAL_REQUIRED) {
+        peer_authorization_revoke();
         give_lock();
         return false;
     }
@@ -607,6 +636,7 @@ bool device_auth_ensure_access(void)
         current = cloud_settings_active();
         ok = current->authorization_state == CLOUD_AUTH_APPROVED &&
             current->event_access[0];
+        if (ok) peer_authorization_allow();
         give_lock();
         return ok;
     }
@@ -619,6 +649,7 @@ bool device_auth_ensure_access(void)
             if (!next_start_ms || mono_ms() >= next_start_ms) start_locked();
         } else {
             cloud_settings_t next = *current;
+            peer_authorization_revoke();
             device_auth_state_reapproval(&next);
             cloud_settings_store(&next);
             cloud_settings_activate(&next);
@@ -627,6 +658,7 @@ bool device_auth_ensure_access(void)
         current = cloud_settings_active();
         ok = current->authorization_state == CLOUD_AUTH_APPROVED &&
             current->event_access[0];
+        if (ok) peer_authorization_allow();
         give_lock();
         return ok;
     }
@@ -635,6 +667,7 @@ bool device_auth_ensure_access(void)
         if (current->refresh_token[0]) refresh_locked(false);
         else {
             cloud_settings_t next = *current;
+            peer_authorization_revoke();
             device_auth_state_reapproval(&next);
             cloud_settings_store(&next);
             cloud_settings_activate(&next);
@@ -649,6 +682,28 @@ bool device_auth_ensure_access(void)
     current = cloud_settings_active();
     ok = current->authorization_state == CLOUD_AUTH_APPROVED &&
         current->event_access[0];
+    if (ok) peer_authorization_allow();
     give_lock();
     return ok;
+}
+
+void device_auth_worker_initialize(void)
+{
+    /* Called once by cloud_task, never by the small UART console task. */
+    atomic_store(&start_requests, xQueueCreate(1, sizeof(unsigned char)));
+}
+
+bool device_auth_request_start(void)
+{
+    const unsigned char request = 1;
+    QueueHandle_t queue = atomic_load(&start_requests);
+    return queue && xQueueSend(queue, &request, 0) == pdTRUE;
+}
+
+void device_auth_process_requests(void)
+{
+    unsigned char request;
+    QueueHandle_t queue = atomic_load(&start_requests);
+    if (queue && xQueueReceive(queue, &request, 0) == pdTRUE)
+        device_auth_start();
 }

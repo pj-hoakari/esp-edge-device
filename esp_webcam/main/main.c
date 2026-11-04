@@ -1,3 +1,4 @@
+#include "peer_authorization.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -288,6 +289,19 @@ static void peer_task(void *arg)
     ESP_ERROR_CHECK(esp_peer_pre_generate_cert());
     for (;;) {
         command_t cmd;
+        if (peer_authorization_take_disconnect()) {
+            if (peer) { esp_peer_close(peer); peer = NULL; }
+            channel_open = false; jpeg_channel_created = false; ack_pending = false;
+            size = 0; offset = 0; packet_size = 0; next_frame = 0;
+            active_session_id[0] = 0;
+            stream_id = 0; last_ack_us = 0; last_ack_id = 0;
+            while (xQueueReceive(commands, &cmd, 0) == pdTRUE) free(cmd.sdp);
+            xSemaphoreTake(answer_lock, portMAX_DELAY);
+            free(pending_answer);
+            pending_answer = NULL;
+            pending_answer_session[0] = 0; pending_answer_at = 0;
+            xSemaphoreGive(answer_lock);
+        }
         if (xQueueReceive(commands, &cmd, 0) == pdTRUE) {
             if (peer) { esp_peer_close(peer); peer = NULL; }
             memcpy(active_session_id, cmd.session_id, sizeof(active_session_id));
@@ -303,8 +317,9 @@ static void peer_task(void *arg)
             xSemaphoreTake(answer_lock, portMAX_DELAY);
             free(pending_answer);
             pending_answer = NULL;
+            pending_answer_session[0] = 0; pending_answer_at = 0;
             xSemaphoreGive(answer_lock);
-            if (cmd.sdp && open_peer() == 0) {
+            if (!peer_authorization_blocked() && cmd.sdp && open_peer() == 0) {
                 int ret = esp_peer_new_connection(peer);
                 if (ret == 0) {
                     esp_peer_msg_t msg = {.type = ESP_PEER_MSG_TYPE_SDP,
@@ -346,7 +361,7 @@ static void peer_task(void *arg)
         // not a transmit lock: waiting for it used to cap the video below the
         // 6 fps goal. A slow viewer now loses old frames instead of stopping
         // the capture pipeline.
-        if (channel_open && !size && now >= next_frame) {
+        if (!peer_authorization_blocked() && channel_open && !size && now >= next_frame) {
             camera_frame_info_t got = info;
             int64_t before = esp_timer_get_time();
             size_t n = camera_read_frame(frame, &got);
@@ -373,7 +388,7 @@ static void peer_task(void *arg)
         // Amortize the event-loop receive timeout and task delay across up to
         // four chunks. Bound each burst so ACK/SACK/ICE processing still runs.
         int64_t burst_start = esp_timer_get_time();
-        for (int chunk = 0; size && chunk < atomic_load(&burst_chunks); chunk++) {
+        for (int chunk = 0; size && !peer_authorization_blocked() && chunk < atomic_load(&burst_chunks); chunk++) {
             now = esp_timer_get_time();
             if (now - burst_start >= atomic_load(&burst_time_us)) break;
             if (now - send_since > budget_us) {
@@ -435,7 +450,7 @@ static void peer_task(void *arg)
 
 bool webrtc_submit_offer(const char *sdp, const char *session_id)
 {
-    if (!commands || !sdp || !session_id) return false;
+    if (peer_authorization_blocked() || !commands || !sdp || !session_id) return false;
     char *copy = strdup(sdp);
     if (!copy) return false;
     command_t cmd = {.sdp = copy};

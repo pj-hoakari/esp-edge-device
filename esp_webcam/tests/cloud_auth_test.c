@@ -46,11 +46,21 @@ static void make_token(cJSON *claims, char *out, size_t size)
 static void url_checks(void)
 {
     const char *good[] = {
-        "http://localhost:18080", "https://idp.example", "https://auth.example:8443",
-        "http://192.168.1.20:8080",
+        "https://idp.example", "https://auth.example:8443",
     };
     for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++)
         assert(cloud_idp_url_valid(good[i]));
+#if defined(CONFIG_WEBCAM_ALLOW_INSECURE_HTTP) && CONFIG_WEBCAM_ALLOW_INSECURE_HTTP
+    assert(cloud_idp_url_valid("http://localhost:18080"));
+    assert(cloud_emulator_host_valid("localhost:9099"));
+    assert(cloud_emulator_host_valid("http://localhost:8080"));
+#else
+    assert(!cloud_idp_url_valid("http://localhost:18080"));
+    assert(!cloud_emulator_host_valid("localhost:9099"));
+    assert(!cloud_emulator_host_valid("http://localhost:8080"));
+#endif
+    assert(cloud_emulator_host_valid("https://emulator.example:443"));
+    assert(cloud_emulator_host_valid(""));
     const char *bad[] = {
         "", "idp.example", "ftp://idp.example", "https://idp.example/",
         "https://idp.example/path", "https://idp.example?x=1", "https://idp.example#x",

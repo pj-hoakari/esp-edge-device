@@ -1,4 +1,5 @@
 #include "network_settings.h"
+#include "credential_transport.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -59,6 +60,7 @@ bool network_signaling_normalize(const char *input, char *out, size_t size)
     if (!size || strlen(input) >= NETWORK_SIGNALING_SIZE) return false;
     if (!strcmp(input, "off") || !input[0]) { out[0] = 0; return true; }
     bool tls = !strncmp(input, "https://", 8);
+    if (!tls && !credential_url_allowed("http://")) return false;
     bool url = tls || !strncmp(input, "http://", 7);
     const char *host = url ? input + (tls ? 8 : 7) : input;
     size_t len = strlen(host);

@@ -19,3 +19,6 @@ bool cloud_settings_migrate(const void *blob, size_t size, cloud_settings_t *out
  * claim must match it. */
 bool cloud_token_parse(const char *token, const char *expected_edge_device_id,
                        int64_t now, cloud_token_claims_t *out);
+
+/* Empty selects production; bare emulator hosts require the development flag. */
+bool cloud_emulator_host_valid(const char *host);

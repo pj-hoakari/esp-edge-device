@@ -39,7 +39,7 @@ typedef struct {
     char firebase_project_id[CLOUD_PROJECT_SIZE];
     char firebase_api_key[CLOUD_API_KEY_SIZE];
     /* Empty selects the production endpoints. For emulators use
-     * host:port, http://host[:port], or https://host[:port]. */
+     * https://host[:port]. Bare hosts and HTTP require the development flag. */
     char firestore_emulator_host[CLOUD_HOST_SIZE];
     char auth_emulator_host[CLOUD_HOST_SIZE];
     char idp_url[CLOUD_IDP_URL_SIZE];

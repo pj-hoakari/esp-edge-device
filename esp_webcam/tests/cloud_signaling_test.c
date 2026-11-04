@@ -217,6 +217,9 @@ bool firebase_firestore_batch_write(const cloud_settings_t *settings,
     return true;
 }
 
+void device_auth_worker_initialize(void) { }
+void device_auth_process_requests(void) { }
+
 bool device_auth_ensure_access(void)
 {
     record_call(CALL_ENSURE_ACCESS);

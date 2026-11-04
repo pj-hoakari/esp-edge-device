@@ -302,11 +302,11 @@ static void configure_signaling(void)
 {
     char text[NETWORK_SIGNALING_SIZE];
     network_settings_t next = saved;
-    puts("Enter IPv4/hostname[:port] (default http:8080), http(s)://host[:port], or off.");
+    puts("Enter https://host[:port], or off. HTTP/bare hosts require a development build.");
     if (read_line("Signaling server: ", text, sizeof(text), false)) {
         if (text[0] && network_signaling_normalize(text, next.signaling_url, sizeof(next.signaling_url)))
             save_settings(&next);
-        else puts("Invalid server. Use an HTTP origin with no path, credentials or query; use off to disable.");
+        else puts("Invalid or disallowed server. Use an HTTPS origin with no path, credentials or query; use off to disable.");
     }
     wipe(&next, sizeof(next));
 }
@@ -323,11 +323,11 @@ static void configure_cloud(void)
     puts("Cloud signaling setup. The Edge Bridge URL is set by the signaling command.");
     puts("Ctrl-C cancels. Device authorization obtains event_access automatically.");
     if (!read_line("Edge device ID (16 lowercase hex): ", edge, sizeof(edge), false)) goto done;
-    if (!read_line("IdP issuer (http(s)://host[:port], no path): ", idp, sizeof(idp), false)) goto done;
+    if (!read_line("IdP issuer (https://host[:port], no path): ", idp, sizeof(idp), false)) goto done;
     if (!read_line("Firebase project ID: ", project, sizeof(project), false)) goto done;
     if (!read_line("Firebase Web API key: ", key, sizeof(key), false)) goto done;
-    if (!read_line("Firestore emulator (host:port or https://host; empty = production): ", firestore, sizeof(firestore), false)) goto done;
-    if (!read_line("Auth emulator (host:port or https://host; empty = production): ", auth, sizeof(auth), false)) goto done;
+    if (!read_line("Firestore emulator (https://host[:port]; empty = production): ", firestore, sizeof(firestore), false)) goto done;
+    if (!read_line("Auth emulator (https://host[:port]; empty = production): ", auth, sizeof(auth), false)) goto done;
     snprintf(next.idp_url, sizeof(next.idp_url), "%s", idp);
     snprintf(next.edge_device_id, sizeof(next.edge_device_id), "%s", edge);
     snprintf(next.firebase_project_id, sizeof(next.firebase_project_id), "%s", project);
@@ -534,7 +534,7 @@ static void handle_json_command(const char *line)
     } else if (!strcmp(type->valuestring, "status")) {
         json_status();
     } else if (!strcmp(type->valuestring, "device_authorization")) {
-        device_auth_start();
+        if (!device_auth_request_start()) json_error("authorization_queue_full_or_unavailable");
     } else if (!strcmp(type->valuestring, "reboot")) {
         cJSON *reply = cJSON_CreateObject();
         cJSON_AddStringToObject(reply, "type", "reboot");

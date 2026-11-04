@@ -1,4 +1,5 @@
 #include "firebase_client.h"
+#include "credential_transport.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,12 +71,15 @@ static int http_request(const char *url, esp_http_client_method_t method,
                         const char *body, char *out, size_t out_size, int *status,
                         bool connect_protocol)
 {
+    *status = 0;
+    if (!credential_url_allowed(url)) return -1;
     esp_http_client_config_t config = {
         .url = url,
         .timeout_ms = 10000,
         .buffer_size = 4096,
         .buffer_size_tx = 2048,
         .keep_alive_enable = false,
+        .disable_auto_redirect = true,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
