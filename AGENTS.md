@@ -169,7 +169,7 @@ ESP は viewer-server を使わず、`signaling`（Edge Bridge の base URL）�
 ポーリングで sessions/signals を読み書きし、観測ページ（console 役）と `jpeg` DataChannel を
 確立する。観測ページは `?camera=<ESPのedgeDeviceId>` で ESP を映像ソースにする。
 viewer-server の HTTP ポーリング経路は非使用。Firestore/Auth のエミュレータは
-`host:port` のほか `https://host` も指定でき、TryCloudflare の2ドメイン構成に対応する。
+`host:port` のほか `https://host` も指定でき、HTTPS のリバースプロキシ構成に対応する。
 通常の COM ポート書き込みは `tools/flash_serial.py`、Pico debugprobe は
 `tools/flash_debugprobe.py` を使う。設定・手順は README の「tolo-edge-bridge 接続」と
 `tolo-web/README.md` の「ESP32 カメラを観測ページにつなぐ」を参照する。

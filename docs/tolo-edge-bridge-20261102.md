@@ -102,51 +102,9 @@ ESP が書く answer の形:
 }
 ```
 
-## TryCloudflare で2ドメインを使う（ESP 用）
+## ネットワーク
 
-ホスト PC から ESP へ直接届かない場合、TryCloudflare のトンネルを2本立てられる。
-先に通常の compose（firebase-emulator / fakeidp / edge-bridge / web）を起動しておき、
-そのうえで ESP 用のオーバーレイを重ねる。tolo-web 側に ESP 用のオーバーレイがある。
-
-```bash
-cd tolo-web
-task esp-tunnel          # 2本のトンネルを起動して URL を表示
-# または
-docker compose -f compose.yaml -f compose.esp-tunnel.yaml up -d \
-  esp-tunnel-proxy esp-emulator-tunnel esp-edge-tunnel
-docker compose -f compose.yaml -f compose.esp-tunnel.yaml logs -f \
-  esp-edge-tunnel esp-emulator-tunnel
-task esp-tunnel:stop     # 停止
-```
-
-出力は2つ:
-
-- `esp-edge-tunnel`: tolo-edge-bridge のシグナリング用
-  - 例: `https://abcd-....trycloudflare.com`
-- `esp-emulator-tunnel`: Firestore と Auth を1つのドメインにまとめたもの
-  - 例: `https://wxyz-....trycloudflare.com`
-  - `/v1/*` は Firestore、`/identitytoolkit...` と `/securetoken...` は Auth へ Caddy が振り分ける
-
-ESP の設定は次のようになる。
-
-```text
-signaling
-  -> https://<esp-edge-tunnel の URL>
-
-cloud
-  -> Firestore: https://<esp-emulator-tunnel の URL>
-  -> Auth:      https://<esp-emulator-tunnel の URL>
-```
-
-`cloud` の host は `host:port` だけでなく `http://host[:port]` / `https://host[:port]` を
-受け付ける。TryCloudflare は HTTPS なので `https://...` をそのまま入力する。
-URL はトンネルを再起動するたびに変わる。変わったら `signaling` / `cloud` を再設定して
-`reboot` する。
-
-注意: ESP 用のエミュレータトンネルはメール認証を付けていない開発用の入口である。
-Firestore/Auth のエミュレータを外部に公開したくない場合は、ESP とホストを同一 LAN に置き、
-`192.168.1.20:8080` のような LAN IP を使う。edge-bridge のトンネルは `event_access` を
-検証するが、公開範囲は必要最小限にする。
+ESP とホスト PC は同一 LAN に置き、ESP から到達できるホストの LAN IP を使う。Firestore / Auth を HTTPS にする場合も、開発環境をインターネットへ公開するトンネルは使わない。必要なら LAN 内に HTTPS のリバースプロキシを用意する。
 
 ## ESP の設定
 

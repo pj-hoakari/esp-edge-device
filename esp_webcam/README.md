@@ -16,7 +16,7 @@ edge ピアとして参加する。ブラウザ（観測ページ）が ESP セ�
 signaling            -> http://<Edge Bridge のホスト>:8787
 cloud                -> Edge device ID / IdP issuer / Firebase project ID / API key /
                         Firestore / Auth のエミュレータ
-                        （LAN IP:port、または https://<TryCloudflare ドメイン>）
+                        （ESP から到達できるホストの LAN IP:port）
 device_authorization -> Device Authorization を開始し、user_code を JSON で出力
 show                 -> active/saved の cloud 設定と認可状態を確認
 reboot
@@ -40,11 +40,7 @@ Web Serial の設定コマンドは次の形式（1行1JSON、`\n` 終端）。
 `status`・`device_authorization`・`reboot` もJSONで応答する。Wi-Fiパスワードと
 トークンはJSONにもログにも出さない。
 
-Firestore / Auth を TryCloudflare 経由にする場合は、tolo-web 側で
-`task esp-tunnel` を実行し、表示される2つのURLを使う（edge-bridge 用と
-Firestore/Auth 用で別ドメイン）。URL はトンネル再起動で変わるため、その都度
-`signaling` / `cloud` または Web Serial で設定し直す。メール認証付きの `task tunnel` は
-ESP には使えない。
+Firestore / Auth を HTTPS にする場合は、LAN 内に HTTPS のリバースプロキシを用意する。開発環境をインターネットへ公開するトンネルは使わない。
 
 時刻は SNTP（`pool.ntp.org`）で合わせる。オフライン環境では既存の `clock` で設定する。
 Firestore と HTTPS の都合上、ESP の時計が大きくずれていると接続できない。
