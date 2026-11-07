@@ -9,32 +9,43 @@ edge ピアとして参加する。ブラウザ（観測ページ）が ESP セ�
 間隔で読む。映像は従来どおり `jpeg` DataChannel（JPG1 断片）で送る。
 
 必要な設定は NVS の `cloud` と `network` に保存する。Edge Bridge の URL は既存の
-`signaling` コマンド、Firebase と ESP の ID は `cloud`、事前発行した `event_access` は
-`token` で投入する。設定後は `reboot` で反映する。
+`signaling` コマンド、Firebase・ESP の ID・IdP の issuer は `cloud` で設定する。
+通常は管理UIの Web Serial から JSON Lines でまとめて書き込み、設定後に自動で再起動する。
 
 ```text
 signaling            -> http://<Edge Bridge のホスト>:8787
-cloud                -> Edge device ID / Firebase project ID / API key /
-                        Firestore emulator host / Auth emulator host
-                        （エミュレータは ESP から到達できる PC の LAN IP:port）
-token                -> event_access JWT（マスク入力）
-show                 -> active/saved の cloud 設定とトークンの有無を確認
+cloud                -> Edge device ID / IdP issuer / Firebase project ID / API key /
+                        Firestore / Auth のエミュレータ
+                        （ESP から到達できるホストの LAN IP:port）
+device_authorization -> Device Authorization を開始し、user_code を JSON で出力
+show                 -> active/saved の cloud 設定と認可状態を確認
 reboot
 ```
 
-`event_access` は tolo-web の開発手順と同じく fakeidp から発行する。
-`client_id` は `edge-page`、`tenant_id` と `event_id` は観測ページを開くイベントに合わせる。
+ESP は IdP の public client `esp-camera` として Device Authorization Grant を使う。
+`scope` は `events.stream` だけで、`tenant_id` / `event_id` / `edge_device_id` は
+スタッフが管理UIで承認した内容から event_access のクレームに入る。ESP 自身は
+`event_id` や `edge_device_id` を Device Authorization 要求に送らない。
+起動後は認可がなければ自動で Device Authorization を開始し、`user_code` をシリアルへ
+JSON Lines で出力する。承認後は event_access を取得し、期限の70〜80%で Refresh Token
+を使って更新する。トークンと Refresh Token は NVS に保存し、ログや画面には出さない。
 
-```bash
-curl -sf http://localhost:8082/token \
-  -H 'Content-Type: application/json' \
-  -d '{"token_use":"event_access","sub":"dev-esp","client_id":"edge-page","scope":"events.report","tenant_id":"0123456789abcdef","event_id":"fedcba9876543210","ttl_seconds":86400}' \
-  | jq -r .access_token
+Web Serial の設定コマンドは次の形式（1行1JSON、`\n` 終端）。
+
+```json
+{"type":"config","version":1,"wifi_ssid":"...","wifi_password":"...","signaling_url":"http://host:8787","idp_url":"https://auth.example","firebase_project_id":"...","firebase_api_key":"...","firestore_emulator_host":"","firebase_auth_emulator_host":"","edge_device_id":"0123456789abcdef"}
 ```
 
-トークンの `exp` が切れると ESP は再サインインできない。`token` で再投入して `reboot` する。
+成功時は `{"type":"config_result","ok":true}` を返して約500ms後に再起動する。
+`status`・`device_authorization`・`reboot` もJSONで応答する。Wi-Fiパスワードと
+トークンはJSONにもログにも出さない。
+
+Firestore / Auth を HTTPS にする場合は、LAN 内に HTTPS のリバースプロキシを用意する。開発環境をインターネットへ公開するトンネルは使わない。
+
 時刻は SNTP（`pool.ntp.org`）で合わせる。オフライン環境では既存の `clock` で設定する。
 Firestore と HTTPS の都合上、ESP の時計が大きくずれていると接続できない。
+Refresh が `invalid_grant` を返した場合や、更新中に再起動した場合は再承認が必要になる。
+そのときは `show` の `Authorization: required` を確認し、管理UIから再度承認する。
 
 ESP の `edgeDeviceId` は 16 桁小文字 hex とする。観測ページの管理UI向け URL
 （`.../observation/<観測ページのedgeDeviceId>`）に `?camera=<ESPのedgeDeviceId>` を足す。
@@ -45,6 +56,91 @@ ESP は `IssueFirestoreToken` を event_access 付きで呼び、返ったカス
 Auth にサインインし、`sessions` と `signals` を読み書きする。`viewer-server` の
 `/api/esp/offer`・`/api/esp/answer` はもう使わない。
 契約・設定・確認手順の詳細は [tolo-edge-bridge 接続メモ](../docs/tolo-edge-bridge-20261102.md) を参照する。
+
+## NVS暗号化とパーティション（2026-11追加）
+
+NVSにはWi-Fi資格情報、EAP証明書・秘密鍵、クラウド設定、`event_access`、
+Refresh Tokenが保存される。ADR-0127の「可能なら保存領域を暗号化する」に合わせ、
+ESP-IDFのNVS暗号化（XTS-AES）を使う。8MBフラッシュ用の
+`esp_webcam/partitions.csv`へ`nvs_keys`パーティションを追加した。
+factoryのオフセットとサイズは従来の`partitions_singleapp_large.csv`と同じ
+`0x10000` / `0x177000`のままとし、既存のアプリ配置を変えない。
+
+| 名前 | 種別 | オフセット | サイズ | 備考 |
+| --- | --- | --- | --- | --- |
+| `nvs` | data / nvs | `0x9000` | `0x6000` | 設定・トークン |
+| `phy_init` | data / phy | `0xf000` | `0x1000` | |
+| `factory` | app / factory | `0x10000` | `0x177000` | 従来と同じ |
+| `nvs_keys` | data / nvs_keys | `0x187000` | `0x1000` | フラッシュ暗号化は未使用 |
+
+`CONFIG_PARTITION_TABLE_CUSTOM=y`、`CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"`、
+`CONFIG_NVS_ENCRYPTION=y`を`sdkconfig.defaults`へ設定した。NVS暗号化の有効・無効は
+`CONFIG_WEBCAM_NVS_ENCRYPTION`（既定`y`）で切り替える。無効にすると従来どおり
+暗号化なしでNVSを初期化する。`CONFIG_NVS_SEC_KEY_PROTECT_NONE=y`とし、鍵の読み書きは
+`main/nvs_boot.c`が`nvs_keys`パーティションを直接扱う（`nvs_sec_provider`の既定方式は使わない）。
+この構成では`nvs_flash_init()`を直接呼ばず、アプリのNVS初期化は必ず`nvs_boot_init()`を通す。
+
+起動時の処理は次のとおり。
+
+1. `nvs_keys`パーティションを探す。見つからなければ警告を出し、暗号化なしで起動する。
+2. `nvs_flash_read_security_cfg`で鍵を読む。空なら`nvs_flash_generate_keys`で生成する。
+3. `nvs_flash_secure_init`で`nvs`を暗号化して初期化する。
+4. 鍵が壊れている、または暗号化初期化に失敗した場合は、警告を出して暗号化なしへフォールバックする。
+5. `ESP_ERR_NVS_NO_FREE_PAGES`と`ESP_ERR_NVS_NEW_VERSION_FOUND`は従来どおり
+   `nvs_flash_erase`後に再試行する。
+
+**既存の暗号化なし端末を更新する場合**
+
+暗号化へ切り替えると、既存の平文NVSはそのままでは読めない。更新前に
+Web Serialの設定値（Wi-Fi、IdP、Firebase、edgeDeviceId）を控え、次のいずれかで
+NVSを消去してから書き込み、再プロビジョニングする。
+
+```sh
+idf.py -p <PORT> erase-flash
+python -m esptool --chip esp32s3 --port <PORT> erase-flash
+```
+
+シリアルフラッシャーを使う場合も`--erase`相当の全消去を行う。`nvs_keys`だけを
+個別に消去してはいけない。鍵を失うと暗号化済みNVSを復号できず、設定・トークンが
+失われる。`idf.py flash`は通常、消去を伴わないため、暗号化へ切り替える最初の
+書き込みでは全消去を明示する。暗号化済みの端末で`CONFIG_WEBCAM_NVS_ENCRYPTION`を
+無効にする場合も、同様に全消去と再プロビジョニングが必要になる。
+
+このファームウェアの既定ビルドはフラッシュ暗号化を有効にしていないため、
+`nvs_keys`には`encrypted`フラグを付けていない。フラッシュ暗号化無効のまま
+`encrypted`を付けると、IDFが鍵のCRCを暗号化書き込みし、通常の読み出しと一致せず
+NVS暗号化を再起動後に初期化できなくなるためだ。既定ビルドではNVSの内容は暗号化されるが、
+鍵自体はフラッシュ上に平文で残る。これは開発・互換用であり、物理読み出しに対する
+資格情報保護にはならない。
+
+本番・セキュアビルドでは `sdkconfig.secure.defaults` を使い、ESP32-S3のeFuse HMAC鍵から
+NVS鍵を導出する。HMAC鍵を先にバーンし、`CONFIG_WEBCAM_NVS_REQUIRE_ENCRYPTION=y` で
+平文フォールバックを禁止する。
+
+```sh
+# 例: eFuse key block 0 に HMAC_UP 用途の鍵を書き込む（値は安全に保管する）
+idf.py efuse-burn-key 0 <hmac-key-hex> HMAC_UP
+idf.py -B build-secure -DSDKCONFIG=build-secure/sdkconfig -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.secure.defaults" build
+idf.py -B build-secure -p <PORT> flash
+```
+
+eFuseはやり直せない。既存の平文NVS端末をセキュアビルドへ移す場合は、設定を控えて
+全消去・再プロビジョニングする。HMAC鍵が未設定の端末では、暗号化必須ビルドは
+平文へ降格せず起動を停止する。`sdkconfig.secure.defaults` は開発用の既定ビルドとは
+別のビルドディレクトリを使ってください。
+
+NVS暗号化の判定ロジックは`tests/nvs_boot_test.c`でホスト実行できる。
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -I esp_webcam/main \
+  esp_webcam/tests/nvs_boot_test.c esp_webcam/main/nvs_boot_values.c \
+  -o /tmp/nvs_boot_test
+/tmp/nvs_boot_test
+```
+
+DockerのESP-IDF v6.1（`espressif/idf:v6.1`）でビルドに成功した（app 1,428,736 bytes、
+0x15cd00、factory 0x177000に対して7%空き）。実機への書き込み、暗号化NVSの生成・
+再起動後の読み出しは未検証。
 
 ## IP表示・簡易疎通確認（2026-11-02追加）
 
@@ -125,8 +221,8 @@ python -m serial.tools.miniterm COM3 115200 --dtr 1 --rts 0 --eol CRLF
 | `credentials` | CA・クライアント証明書・秘密鍵・PACの保存有無とサイズを表示 |
 | `clock` | 起動中のUTC Unix秒を設定。証明書の有効期間検証用 |
 | `signaling` | Edge Bridge のIPv4・ホスト名・`http(s)://` URLを入力し保存。`off`でWebRTCを無効化 |
-| `cloud` | Edge device ID・Firebase project/API key・Firestore/Auth emulator ホストを設定 |
-| `token` | 事前発行した`event_access` JWTをマスク入力で保存 |
+| `cloud` | Edge device ID・IdP issuer・Firebase project/API key・Firestore/Auth エミュレータを設定（`host:port` または `https://host`） |
+| `token` | 復旧用。event_access JWTをマスク入力で保存（通常はDevice Authorizationを使う） |
 | `show` | 現在のIP・設定と次回起動用の保存設定を表示。パスワード・トークンは設定有無だけ表示 |
 | `ping [IPv4]` | IPv4へ3回のICMP疎通確認。宛先省略時はゲートウェイ |
 | `check signaling` / `check stun` | 設定済みサーバーへの読み取り専用HTTP(S)／UDP Binding疎通確認 |
@@ -146,7 +242,8 @@ SSIDは1～32バイト。パスワードは空、8～63バイト、または64�
 Backspaceで修正、Ctrl-Cで中止できる。長すぎる入力や制御文字を含む行は全体を破棄して保存しない。
 設定は専用NVS名前空間`network`の1つのblobとして保存し、RTC調整値の`rtc_tuning`とは独立する。
 保存済み設定がある場合、menuconfigのWi-Fi・サーバー設定を変えて再ビルドしても保存値を優先する。
-通常の書き込みでは保持され、フラッシュ全消去では失われる。NVS暗号化は本変更では追加していない。
+通常の書き込みでは保持され、フラッシュ全消去では失われる。NVSは既定で暗号化される
+（前節「NVS暗号化とパーティション」を参照）。
 保存方式はESP-IDFの[NVS API](https://github.com/espressif/esp-idf/blob/master/components/nvs_flash/include/nvs.h)に従い、
 `nvs_set_blob`後に`nvs_commit`する。
 
@@ -170,6 +267,48 @@ IO0のGND接続を外してENリセットする。NVS保存・再起動後のWi-
 `tests/test_network_console.py`は実際のコンソール処理をUART/NVSのPC用アダプターで動かし、
 ログ切替、CRLF、通常入力の表示、秘密入力のマスク、キャンセル、NVSからの再読込みを検証する。
 MSVC開発者コマンドプロンプトで`python esp_webcam/tests/test_network_console.py`を実行し、成功した。
+
+Device Authorization とクラウド設定のPCテストは次のとおり。
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -I esp_webcam/main \
+  -I esp_webcam/managed_components/espressif__cjson/cJSON \
+  esp_webcam/tests/cloud_auth_test.c esp_webcam/main/cloud_settings_values.c \
+  esp_webcam/main/device_auth_values.c esp_webcam/main/cloud_auth_logic.c \
+  esp_webcam/managed_components/espressif__cjson/cJSON/cJSON.c -lm -o /tmp/cloud_auth_test
+/tmp/cloud_auth_test
+python3 esp_webcam/tests/test_serial_protocol.py
+```
+
+`cloud_auth_test`はcloud設定v1/v2移行、IdP URL検証、event_accessのクレーム検証、
+Device Authorization応答の解析、承認・Refreshローテーション・再承認の状態遷移、
+event_accessが更新されたときのFirebase再サインイン判断、Firestore 401/403の再発行判断、
+JSON出力にトークンを含めないことを確認する。`test_serial_protocol.py`はJSON Linesの
+`config`/`status`/`device_authorization`を疑似UARTで実行し、検証エラー、JSONのみの応答、
+Wi-Fiパスワードの非表示、設定保存と再起動を確認する。
+
+シグナリング経路のトークン再発行順を確認する回帰テストは次のとおり。
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -I esp_webcam/tests/stubs -I esp_webcam/main \
+  -I esp_webcam/managed_components/espressif__cjson/cJSON \
+  esp_webcam/tests/cloud_signaling_test.c esp_webcam/main/cloud_auth_logic.c \
+  esp_webcam/managed_components/espressif__cjson/cJSON/cJSON.c -lm \
+  -o /tmp/cloud_signaling_test
+/tmp/cloud_signaling_test
+```
+
+`cloud_signaling_test`は`cloud_signaling.c`をホスト用スタブとリンクし、
+event_access更新後の再発行で`firebase_refresh`を呼ばないこと、
+IDトークン期限切れ間際は`firebase_refresh`を使うこと、
+Firestore 401/403でカスタムトークンを再発行して同じ要求を1回だけ再試行すること、
+トークン値がログに出ないことを確認する。
+
+2026-11-03のPhase 6変更では、`cloud_auth_test`と`test_serial_protocol.py`、
+既存の`network_settings_test.c`が成功した。
+DockerのESP-IDF v6.1（`espressif/idf:v6.1`）で`idf.py build`が成功し、
+appは1,423,424 bytes（0x15b840）、アプリ領域0x177000に対して0x1b7c0（7%）空き。
+実機の書き込み・Device Authorizationの実IdP接続は未実施。
 ログ表示修正版も同じCOM3経由で書き込み、全イメージのハッシュ照合に成功。
 IO0のGND接続を外してENリセットした実機で、次を確認した。
 
@@ -488,17 +627,22 @@ git submodule update --init --recursive
    ```
 
 4. `ESP webcam`でSSID・パスワード・カメラ対応fps・送信目標fps・
-   `Edge Bridge base URL`・`STUN server URL`を入力する。Firebase と edgeDeviceId、
-   event_access は書き込み後にシリアル（`signaling` / `cloud` / `token`）で設定する。
+   `Edge Bridge base URL`・`STUN server URL`を入力する。Firebase・IdP・edgeDeviceId は
+   書き込み後に Web Serial またはシリアル（`signaling` / `cloud`）で設定する。
+   event_access は Device Authorization で自動取得する。
    保存済みNVS設定があればそちらを優先する。
    認証情報はローカルの` sdkconfig `とビルド成果物に含まれるため、これらを共有しない。
    ソース・既定値・実行ログには認証情報を記載しない。
-5. ビルドしてUART経由で書き込む。COM番号は実際のポートへ置き換える。
+5. ビルドして書き込む。COM番号は実際のポートへ置き換える。
 
    ```powershell
    idf.py build
-   idf.py -p COM5 flash monitor
+   python tools/flash_serial.py --port COM5 --check
+   python tools/flash_serial.py --port COM5
    ```
+
+   Pico debugprobe の UART 経由は `tools/flash_debugprobe.py` を使う。
+   `idf.py -p COM5 flash monitor` でも書き込める。
 
 6. 給電・USBホスト配線を確認した上で、対象カメラをPCから外してESP側のホストポートへ接続する。
    観測ページ `.../observation/<観測ページのedgeDeviceId>?camera=<ESPのedgeDeviceId>` を開き、
@@ -614,3 +758,34 @@ ESPへ届いていない。LAN外はTURN/STUN等の追加設計が必要。
 - [USB Host / PHY共有制約](https://docs.espressif.com/projects/esp-usb/en/latest/esp32s3/usb_host.html#external-phy-configuration)。
 
 基板・回路図は変更していないためERC/DRCは今回のソフトウェア変更では実行しない。
+
+### 2026-11-04: 認可処理とHTTPSの回帰修正
+
+Web Serialの`device_authorization`は長さ1のキューへ要求を入れて直ちに戻る。
+HTTP/TLS・認可処理・user_codeのJSON出力はcloudタスクで行う。
+キュー満杯またはcloudワーカー未起動なら、JSONエラー
+`authorization_queue_full_or_unavailable`を返す。認可開始の大きな作業領域はヒープへ置く。
+
+Refreshの`invalid_grant`、grant期限切れ、再承認が必要な状態では、送信をブロックして
+peerタスクへ切断を通知する。peerタスクが接続を閉じ、送信途中のJPEG・キュー内のoffer・
+保留answerを破棄する。認可タスクからpeer APIは呼ばない。再承認後はFirebaseセッションと
+SDPを引き継がず、新しい接続を待つ。
+
+`CONFIG_WEBCAM_ALLOW_INSECURE_HTTP`の既定値は`n`。
+IdP・Edge Bridge・Firestore/Auth emulatorはHTTPS URLを設定する。
+既存NVSやKconfigにHTTP設定が残っていても、資格情報送信の直前に拒否する。
+裸のemulatorホストやsignalingホストもHTTP扱いなので拒否する。
+ローカル開発でHTTPが必要な場合だけmenuconfigでこのフラグを明示的に有効にする。
+HTTPではRefresh Tokenも平文になる。HTTPSからHTTPへの自動リダイレクトは行わない。
+
+次のコマンドで主要ホスト回帰テストを実行する（C11対応`cc`とPython 3が必要）。
+
+```bash
+python3 esp_webcam/tests/run_host_tests.py
+```
+
+cloud_auth・network_settingsは本番用と開発用の両設定で実行する。
+追加テストは実際のdevice_auth/Firebase HTTP入口とpeerループをホスト用アダプターで動かし、
+キュー経由の開始・満杯エラー・user_codeの出力回数・invalid_grant時の送信停止とSDP破棄・
+NVS保存失敗時の失効・grant期限切れ・HTTP拒否／開発ビルド時のみ許可を確認する。
+実機でのWeb Serial操作、TLS時のスタック余裕、再承認後の映像再接続は別途確認が必要。

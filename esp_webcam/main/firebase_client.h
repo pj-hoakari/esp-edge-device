@@ -13,12 +13,15 @@ typedef struct {
     char id_token[FIREBASE_TOKEN_SIZE];
     char refresh_token[FIREBASE_REFRESH_SIZE];
     int64_t id_token_expires_at;
+    /* event_access metadata used for the custom token sign-in. */
+    int64_t event_access_obtained_at;
+    int64_t event_access_expires_at;
 } firebase_session_t;
 
 /* Calls tolo-edge-bridge IssueFirestoreToken with the pre-provisioned
  * event_access and returns the Firebase custom token. */
 bool firebase_issue_custom_token(const char *signaling_url, const char *event_access,
-                                 char *custom_token, size_t size);
+                                 char *custom_token, size_t size, int *status);
 
 bool firebase_sign_in(const cloud_settings_t *settings, const char *custom_token,
                       firebase_session_t *session);

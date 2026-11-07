@@ -87,12 +87,21 @@ int main(void)
     profile.eap_method = NETWORK_EAP_PEAP;
     memset(profile.username, 'u', sizeof(profile.username)); assert(!network_eap_valid(&profile));
 
+#if defined(CONFIG_WEBCAM_ALLOW_INSECURE_HTTP) && CONFIG_WEBCAM_ALLOW_INSECURE_HTTP
     server("192.168.137.1", "http://192.168.137.1:8080");
     server("192.168.1.20:9000", "http://192.168.1.20:9000");
     server("viewer.local", "http://viewer.local:8080");
     server("http://viewer.local", "http://viewer.local");
     server("http://viewer.local:8080/", "http://viewer.local:8080");
     server("http://viewer.local:65535", "http://viewer.local:65535");
+#else
+    const char *http[] = {"192.168.137.1", "viewer.local:8080", "http://viewer.local",
+                          "http://viewer.local:8080/"};
+    for (size_t i = 0; i < sizeof(http) / sizeof(http[0]); i++) {
+        char out[192];
+        assert(!network_signaling_normalize(http[i], out, sizeof(out)));
+    }
+#endif
     server("https://viewer.local", "https://viewer.local:443");
     server("https://viewer.local/", "https://viewer.local:443");
     server("https://viewer.local:8443", "https://viewer.local:8443");

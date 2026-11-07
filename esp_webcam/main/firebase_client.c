@@ -1,4 +1,5 @@
 #include "firebase_client.h"
+#include "credential_transport.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,22 @@ static void wipe(void *data, size_t size)
 {
     volatile unsigned char *p = data;
     while (size--) *p++ = 0;
+}
+
+/* Returns the host without the scheme and sets the scheme to use. A bare
+ * host:port keeps the emulator-friendly http default. */
+static const char *emulator_endpoint(const char *value, const char **scheme)
+{
+    if (!strncmp(value, "https://", 8)) {
+        *scheme = "https://";
+        return value + 8;
+    }
+    if (!strncmp(value, "http://", 7)) {
+        *scheme = "http://";
+        return value + 7;
+    }
+    *scheme = "http://";
+    return value;
 }
 
 static bool json_string(const cJSON *root, const char *name, char *out, size_t size)
@@ -54,10 +71,15 @@ static int http_request(const char *url, esp_http_client_method_t method,
                         const char *body, char *out, size_t out_size, int *status,
                         bool connect_protocol)
 {
+    *status = 0;
+    if (!credential_url_allowed(url)) return -1;
     esp_http_client_config_t config = {
         .url = url,
         .timeout_ms = 10000,
+        .buffer_size = 4096,
+        .buffer_size_tx = 2048,
         .keep_alive_enable = false,
+        .disable_auto_redirect = true,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -91,6 +113,9 @@ static int http_request(const char *url, esp_http_client_method_t method,
     *status = esp_http_client_get_status_code(client);
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "HTTP request failed: %s (%s), status=%d", url, esp_err_to_name(err), *status);
+    }
     return err == ESP_OK ? total : -1;
 }
 
@@ -118,28 +143,39 @@ static bool form_append(char *out, size_t size, const char *name, const char *va
 }
 
 bool firebase_issue_custom_token(const char *signaling_url, const char *event_access,
-                                 char *custom_token, size_t size)
+                                 char *custom_token, size_t size, int *status)
 {
+    if (status) *status = 0;
     char url[HTTP_URL_MAX];
     if (snprintf(url, sizeof(url), "%s/tolo.edgebridge.v1.SignalingService/IssueFirestoreToken",
                  signaling_url) >= (int)sizeof(url)) return false;
 
     char *out = calloc(1, HTTP_ERROR_MAX);
-    if (!out) return false;
-    int status = 0;
-    int length = http_request(url, HTTP_METHOD_POST, event_access, "application/json", "{}",
-                              out, HTTP_ERROR_MAX, &status, true);
+    size_t auth_size = strlen(event_access) + 8;
+    char *auth = calloc(1, auth_size);
+    if (!out || !auth) {
+        free(out);
+        free(auth);
+        return false;
+    }
+    snprintf(auth, auth_size, "Bearer %s", event_access);
+
+    *status = 0;
+    int length = http_request(url, HTTP_METHOD_POST, auth, "application/json", "{}",
+                              out, HTTP_ERROR_MAX, status, true);
     bool ok = false;
-    if (length >= 0 && status == 200) {
+    if (length >= 0 && *status == 200) {
         cJSON *root = cJSON_Parse(out);
         if (root) {
             ok = json_string(root, "firebaseCustomToken", custom_token, size);
             cJSON_Delete(root);
         }
     }
-    if (!ok) log_error("IssueFirestoreToken", out, status);
+    if (!ok) log_error("IssueFirestoreToken", out, *status);
     wipe(out, HTTP_ERROR_MAX);
     free(out);
+    wipe(auth, auth_size);
+    free(auth);
     return ok;
 }
 
@@ -148,9 +184,11 @@ bool firebase_sign_in(const cloud_settings_t *settings, const char *custom_token
 {
     char url[HTTP_URL_MAX];
     if (settings->auth_emulator_host[0]) {
+        const char *scheme;
+        const char *host = emulator_endpoint(settings->auth_emulator_host, &scheme);
         snprintf(url, sizeof(url),
-                 "http://%s/identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=%s",
-                 settings->auth_emulator_host, settings->firebase_api_key);
+                 "%s%s/identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=%s",
+                 scheme, host, settings->firebase_api_key);
     } else {
         snprintf(url, sizeof(url),
                  "https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=%s",
@@ -180,11 +218,15 @@ bool firebase_sign_in(const cloud_settings_t *settings, const char *custom_token
                 json_string(reply, "expiresIn", expires, sizeof(expires));
             if (ok) {
                 session->id_token_expires_at = (int64_t)time(NULL) + atoi(expires);
+                session->event_access_obtained_at = settings->event_access_obtained_at;
+                session->event_access_expires_at = settings->event_access_expires_at;
             }
             cJSON_Delete(reply);
         }
     }
-    if (!ok) {
+    if (ok) {
+        ESP_LOGI(TAG, "Firebase signed in");
+    } else {
         log_error("Firebase sign-in", out, status);
         session->id_token[0] = 0;
         session->refresh_token[0] = 0;
@@ -202,8 +244,10 @@ bool firebase_refresh(const cloud_settings_t *settings, firebase_session_t *sess
     if (!session->refresh_token[0]) return false;
     char url[HTTP_URL_MAX];
     if (settings->auth_emulator_host[0]) {
-        snprintf(url, sizeof(url), "http://%s/securetoken.googleapis.com/v1/token?key=%s",
-                 settings->auth_emulator_host, settings->firebase_api_key);
+        const char *scheme;
+        const char *host = emulator_endpoint(settings->auth_emulator_host, &scheme);
+        snprintf(url, sizeof(url), "%s%s/securetoken.googleapis.com/v1/token?key=%s",
+                 scheme, host, settings->firebase_api_key);
     } else {
         snprintf(url, sizeof(url), "https://securetoken.googleapis.com/v1/token?key=%s",
                  settings->firebase_api_key);
@@ -246,7 +290,9 @@ bool firebase_refresh(const cloud_settings_t *settings, firebase_session_t *sess
             cJSON_Delete(reply);
         }
     }
-    if (!ok) {
+    if (ok) {
+        ESP_LOGI(TAG, "Firebase ID token refreshed");
+    } else {
         log_error("Firebase token refresh", out, status);
         session->id_token[0] = 0;
         session->refresh_token[0] = 0;
@@ -271,9 +317,11 @@ bool firebase_firestore_list(const cloud_settings_t *settings,
     char url[HTTP_URL_MAX];
     int n;
     if (settings->firestore_emulator_host[0]) {
+        const char *scheme;
+        const char *host = emulator_endpoint(settings->firestore_emulator_host, &scheme);
         n = snprintf(url, sizeof(url),
-                     "http://%s/v1/projects/%s/databases/(default)/documents/%s%s",
-                     settings->firestore_emulator_host, settings->firebase_project_id,
+                     "%s%s/v1/projects/%s/databases/(default)/documents/%s%s",
+                     scheme, host, settings->firebase_project_id,
                      collection_path, query ? query : "");
     } else {
         n = snprintf(url, sizeof(url),
@@ -289,7 +337,12 @@ bool firebase_firestore_list(const cloud_settings_t *settings,
                                    status, false) : -1;
     wipe(auth, FIREBASE_TOKEN_SIZE + 8);
     free(auth);
-    return length >= 0 && *status == 200;
+    if (length < 0 || *status != 200) {
+        ESP_LOGW(TAG, "Firestore list %s failed: HTTP %d", collection_path, *status);
+        if (length >= 0) ESP_LOGW(TAG, "Firestore response: %.160s", out);
+        return false;
+    }
+    return true;
 }
 
 bool firebase_firestore_batch_write(const cloud_settings_t *settings,
@@ -299,12 +352,14 @@ bool firebase_firestore_batch_write(const cloud_settings_t *settings,
     char url[HTTP_URL_MAX];
     int n;
     if (settings->firestore_emulator_host[0]) {
+        const char *scheme;
+        const char *host = emulator_endpoint(settings->firestore_emulator_host, &scheme);
         n = snprintf(url, sizeof(url),
-                     "http://%s/v1/projects/%s/databases/(default)/documents:batchWrite",
-                     settings->firestore_emulator_host, settings->firebase_project_id);
+                     "%s%s/v1/projects/%s/databases/(default)/documents:commit",
+                     scheme, host, settings->firebase_project_id);
     } else {
         n = snprintf(url, sizeof(url),
-                     "https://firestore.googleapis.com/v1/projects/%s/databases/(default)/documents:batchWrite",
+                     "https://firestore.googleapis.com/v1/projects/%s/databases/(default)/documents:commit",
                      settings->firebase_project_id);
     }
     if (n < 0 || (size_t)n >= sizeof(url)) return false;
@@ -317,7 +372,7 @@ bool firebase_firestore_batch_write(const cloud_settings_t *settings,
     int length = ok ? http_request(url, HTTP_METHOD_POST, auth, "application/json", body,
                                    out, HTTP_ERROR_MAX, status, false) : -1;
     ok = length >= 0 && *status == 200;
-    if (!ok) log_error("Firestore batchWrite", out, *status);
+    if (!ok) log_error("Firestore commit", out, *status);
     wipe(auth, FIREBASE_TOKEN_SIZE + 8);
     free(auth);
     wipe(out, HTTP_ERROR_MAX);

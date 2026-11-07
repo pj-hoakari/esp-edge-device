@@ -37,6 +37,9 @@ const char *network_eap_name(unsigned method);
 bool network_signaling_normalize(const char *input, char *out, size_t size);
 void network_settings_load(void);
 const network_settings_t *network_settings_active(void);
+const network_settings_t *network_settings_saved(void);
+/* Saves the profile for the next boot without printing human console text. */
+bool network_settings_save(const network_settings_t *settings);
 void network_settings_console_start(void);
 /* UART output only; HTTP diagnostic log capture remains active. */
 bool network_settings_uart_logs_enabled(void);
