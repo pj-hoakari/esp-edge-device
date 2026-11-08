@@ -19,6 +19,43 @@
 #include "cloud_settings_values.h"
 #include "device_auth.h"
 #include "cJSON.h"
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+
+static int console_read_byte(unsigned char *c, unsigned timeout)
+{
+    return usb_serial_jtag_read_bytes(c, 1, timeout);
+}
+
+static void console_wait_tx_done(unsigned timeout)
+{
+    usb_serial_jtag_wait_tx_done(timeout);
+}
+
+static void console_driver_install(void)
+{
+    usb_serial_jtag_driver_config_t config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&config));
+    usb_serial_jtag_vfs_use_driver();
+}
+#else
+static int console_read_byte(unsigned char *c, unsigned timeout)
+{
+    return uart_read_bytes(CONFIG_ESP_CONSOLE_UART_NUM, c, 1, timeout);
+}
+
+static void console_wait_tx_done(unsigned timeout)
+{
+    uart_wait_tx_done(CONFIG_ESP_CONSOLE_UART_NUM, timeout);
+}
+
+static void console_driver_install(void)
+{
+    ESP_ERROR_CHECK(uart_driver_install(CONFIG_ESP_CONSOLE_UART_NUM, 1024, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_set_baudrate(CONFIG_ESP_CONSOLE_UART_NUM, CONFIG_ESP_CONSOLE_UART_BAUDRATE));
+}
+#endif
 
 static const char *TAG = "network_config";
 /* Active settings are immutable after load: HTTP/peer tasks can read without
@@ -138,7 +175,7 @@ static bool read_line(const char *prompt, char *out, size_t size, unsigned echo_
     fflush(stdout);
     for (;;) {
         unsigned char c;
-        if (uart_read_bytes(CONFIG_ESP_CONSOLE_UART_NUM, &c, 1, pdMS_TO_TICKS(100)) != 1) continue;
+        if (console_read_byte(&c, pdMS_TO_TICKS(100)) != 1) continue;
         bool crlf_tail = input.skip_lf && c == '\n';
         size_t before = input.length;
         serial_result_t result = serial_input_feed(&input, out, size, c);
@@ -413,7 +450,7 @@ static void reboot_after_config(void)
 {
     vTaskDelay(pdMS_TO_TICKS(500));
     fflush(stdout);
-    uart_wait_tx_done(CONFIG_ESP_CONSOLE_UART_NUM, pdMS_TO_TICKS(500));
+    console_wait_tx_done(pdMS_TO_TICKS(500));
     esp_restart();
 }
 
@@ -559,7 +596,7 @@ static bool read_command_line(const char *prompt, char *out, size_t size)
     bool silent = false;
     for (;;) {
         unsigned char c;
-        if (uart_read_bytes(CONFIG_ESP_CONSOLE_UART_NUM, &c, 1, pdMS_TO_TICKS(100)) != 1)
+        if (console_read_byte(&c, pdMS_TO_TICKS(100)) != 1)
             continue;
         bool crlf_tail = input.skip_lf && c == '\n';
         if (!started) {
@@ -663,7 +700,7 @@ static void console_task(void *arg)
         } else if (!strcmp(command, "reboot")) {
             puts("Restarting with saved settings...");
             fflush(stdout);
-            uart_wait_tx_done(CONFIG_ESP_CONSOLE_UART_NUM, pdMS_TO_TICKS(500));
+            console_wait_tx_done(pdMS_TO_TICKS(500));
             esp_restart();
         } else if (command[0]) puts("Commands: help, show, ping [IPv4], check signaling/stun, wifi, eap, protocols, credentials, clock, signaling, cloud, token, reboot, logs on/off. Settings apply on reboot.");
         wipe(command, sizeof(command));
@@ -672,8 +709,7 @@ static void console_task(void *arg)
 
 void network_settings_console_start(void)
 {
-    ESP_ERROR_CHECK(uart_driver_install(CONFIG_ESP_CONSOLE_UART_NUM, 1024, 0, 0, NULL, 0));
-    ESP_ERROR_CHECK(uart_set_baudrate(CONFIG_ESP_CONSOLE_UART_NUM, CONFIG_ESP_CONSOLE_UART_BAUDRATE));
+    console_driver_install();
     atomic_store(&uart_logs, false);
     if (xTaskCreate(console_task, "net_console", 12288, NULL, 2, NULL) != pdPASS)
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
