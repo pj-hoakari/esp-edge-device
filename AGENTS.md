@@ -183,6 +183,16 @@ DockerのESP-IDF v6.1でビルド成功（app 1,428,736 bytes、0x15cd00、ア�
 ホストのNVS判定テスト、cloud認証テスト、network設定テスト、シリアルプロトコルテストが成功した。
 実機の書き込み・暗号化NVSの再起動確認は未実施。
 
+2026-11-08、M5Stack Tab5（ESP32-P4 rev v1.3、ESP32-C6 は SDIO の esp_hosted）向けの
+`tab5_camera/` を追加した。内蔵カメラ SC202CS を MIPI-CSI と V4L2 で取り込み、P4 の
+H.264 エンコーダで 1280×720・15fps にして、WebRTC の video track（`sendonly`）で送る。
+観測ページは連続観測（tolo-web の `feat/continuous-observation-h264`）で受信する。
+認可・シグナリング・シリアル設定は `esp_webcam/main/` のソースを CMake から直接参照して共有し、
+`network_settings.c` はコンソールが USB Serial/JTAG のときにそのドライバを使う。
+rev v1.x 向けの依存の固定（esp_video 2.3、esp_capture 不使用、CCM を外した IPA 設定）と
+ビルド・書き込み手順は `tab5_camera/README.md` を参照する。実機で H.264 エンコード 15fps を確認済み。
+Wi-Fi 接続・観測ページでの受信は未検証。
+
 作業開始時に実際の構成を確認し、構成変更に合わせてこの文書を更新する。
 
 ## 作業の進め方

@@ -1,0 +1,65 @@
+# tab5_camera
+
+M5Stack Tab5 の内蔵カメラの映像を、P4 のハードウェアエンコーダで H.264 にして、WebRTC の video track（P2P）で推論デバイスの観測ページへ送るファームウェア。
+観測ページは連続観測でこの映像を推論する。
+
+認可（RFC 8628）、Edge Bridge 経由の Firestore シグナリング、シリアルでのネットワーク・クラウド設定は `../esp_webcam/main/` のソースをそのまま使う。
+Tab5 固有のコードは `main/` の 3 ファイルだけである。
+
+| ファイル | 役割 |
+|---|---|
+| `main/tab5_main.c` | 起動順序（NVS、シリアル設定、IO エキスパンダ、ESP32-C6、カメラ、Wi-Fi、WebRTC） |
+| `main/camera_h264.c` | IO エキスパンダでカメラと Wi-Fi の電源を入れ、MIPI-CSI の SC202CS から V4L2 で取り込み、H.264 デバイスでエンコードする |
+| `main/webrtc_h264.c` | `webrtc.h` の実装。観測ページの offer に `sendonly` の H.264 で応答し、エンコード済みフレームを送る |
+
+## 対象と前提
+
+- ボード: M5Stack Tab5（ESP32-P4 rev v1.x、Flash 16MB、PSRAM 32MB、Wi-Fi は SDIO 接続の ESP32-C6）
+- ESP-IDF v6.1
+- 映像: 1280×720、既定 15fps、2Mbps、GOP 15 フレーム（`menuconfig` の Tab5 camera で変更する）
+- 観測ページは offer に `recvonly` の video transceiver を含める（tolo-web の連続観測）。
+  バースト観測の offer には video m-line がないので、このファームウェアとは映像を交換できない。
+
+## ビルドと書き込み
+
+```sh
+cd tab5_camera
+idf.py set-target esp32p4
+idf.py build
+idf.py -p /dev/cu.usbmodem101 flash
+```
+
+初めて書き込む Tab5 では、工場出荷時のデータが `nvs` と `nvs_keys` に残っていて NVS の暗号化鍵を読めない。
+一度だけ両方を消去する。
+
+```sh
+esptool --port /dev/cu.usbmodem101 erase-region 0x9000 0x6000
+esptool --port /dev/cu.usbmodem101 erase-region 0x10000 0x1000
+```
+
+設定は USB-C の USB Serial/JTAG で行う。
+コマンドは `esp_webcam` と同じで、`help` で一覧を出す。
+Web Serial による管理 UI からのプロビジョニングも同じポートで行う。
+
+## rev v1.x 向けの調整
+
+Tab5 の P4 は rev v1.3 で、rev v3 の命令（Zba/Zbb）を実行できない。
+
+- `sdkconfig.defaults` で `CONFIG_ESP32P4_SELECTS_REV_LESS_V3` を選ぶ
+- `esp_video` は `~2.3.0` に固定する。2.4 以降が使う `esp_ipa` 2.3 以降の IDF 6.x 向けビルド済みライブラリは Zba/Zbb を含み、起動時に Illegal instruction で止まる
+- `esp_capture` は使わない。依存する音声コンポーネントの新しい版が rev v3 を要求し、ビルドが止まる
+- `sc202cs_ipa_rev1.json` はセンサー既定の IPA 設定から色補正行列（CCM）を外したもの。IPA が算出する CCM が rev v1.x の ISP の範囲（±4）を超え、毎フレーム設定に失敗するため
+
+ビルド後の ELF に Zba/Zbb の命令が残っていないことは次で確かめる。
+
+```sh
+riscv32-esp-elf-objdump -d build/tab5_camera.elf \
+  | grep -cE '	sh[123]add|	andn	|	orn	|	clz	|	ctz	|	cpop	|	minu?	|	maxu?	|	bclr|	bset|	sext\.[bh]	|	zext\.h	'
+```
+
+## 制約
+
+- esp_video の H.264 デバイスはキーフレームの強制に対応していない。
+  接続直後と PLI の後は、次の I フレーム（既定で最大 1 秒）まで観測ページに映像が出ない。
+- CCM を外しているので、色は既定の IPA 設定より不正確になる。
+- 画面への表示、音声、タッチは使わない。

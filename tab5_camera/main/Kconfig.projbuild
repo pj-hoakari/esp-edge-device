@@ -1,0 +1,101 @@
+menu "Tab5 camera"
+config WEBCAM_ALLOW_INSECURE_HTTP
+    bool "Allow credential transmission over HTTP (development only)"
+    default n
+    help
+        Permit HTTP IdP, Edge Bridge and Firebase emulator endpoints only
+        for isolated development. HTTP exposes access and refresh tokens.
+        Production builds require HTTPS, including saved NVS endpoints.
+
+config WEBCAM_WIFI_SSID
+    string "Wi-Fi SSID (local sdkconfig only)"
+    default ""
+    help
+        Fallback when no serial network settings have been saved in NVS.
+        Use UART command wifi, then reboot, to configure without rebuilding.
+config WEBCAM_WIFI_PASSWORD
+    string "Wi-Fi password (local sdkconfig only)"
+    default ""
+    help
+        Fallback only. Saved UART network settings take precedence.
+config WEBCAM_NVS_ENCRYPTION
+    bool "Encrypt NVS (cloud settings, tokens, Wi-Fi credentials)"
+    default y
+    help
+        Initialize the default NVS partition with the XTS-AES keys stored in
+        the nvs_keys partition. New devices generate the keys on first boot.
+        If the key partition is missing or encrypted init fails, the firmware
+        falls back to unencrypted NVS so existing devices stay bootable.
+        Disable this to initialize NVS without encryption. A device that
+        already holds encrypted NVS must be erased and reprovisioned when this
+        option is changed.
+config WEBCAM_NVS_REQUIRE_ENCRYPTION
+    bool "Fail closed when NVS encryption is unavailable"
+    default n
+    depends on WEBCAM_NVS_ENCRYPTION
+    help
+        Stop boot if NVS encryption cannot be initialized instead of falling
+        back to plaintext. Enable this in production/secure builds. The
+        secure configuration uses an HMAC key burnt in eFuse; see
+        sdkconfig.secure.defaults and the README.
+config WEBCAM_SIGNALING_URL
+    string "Edge Bridge base URL (empty disables WebRTC)"
+    default "http://192.168.137.1:8787"
+    help
+        Saved UART network settings take precedence. Use the signaling
+        command, then reboot, to change the server without rebuilding.
+        Base URL of tolo-edge-bridge. The ESP calls IssueFirestoreToken and
+        then reads/writes the Firestore signaling documents. Use an address
+        the ESP can reach. Production builds require HTTPS. HTTP and bare
+        hosts are accepted only with WEBCAM_ALLOW_INSECURE_HTTP enabled.
+        HTTPS validates the server with the ESP-IDF CA bundle. Leave empty to
+        run the MJPEG diagnostics without WebRTC.
+config WEBCAM_EDGE_DEVICE_ID
+    string "Edge device ID (16 lowercase hex)"
+    default ""
+    help
+        Public ID of this ESP camera in the signaling path. It is not a
+        credential. Use the same value in the observation page's ?camera=.
+config WEBCAM_IDP_URL
+    string "IdP issuer base URL (empty = provisioning only)"
+    default ""
+    help
+        Base URL of the IdP issuer, for example https://auth.example.com.
+        The ESP calls /oauth2/device_authorization and /oauth2/token on this
+        origin. Must be an HTTPS origin with no path or trailing slash.
+        HTTP is allowed only with WEBCAM_ALLOW_INSECURE_HTTP enabled.
+        Web Serial provisioning normally supplies this value.
+config WEBCAM_FIREBASE_PROJECT_ID
+    string "Firebase project ID"
+    default ""
+config WEBCAM_FIREBASE_API_KEY
+    string "Firebase Web API key"
+    default ""
+config WEBCAM_FIRESTORE_EMULATOR_HOST
+    string "Firestore emulator host:port (empty = production)"
+    default ""
+config WEBCAM_AUTH_EMULATOR_HOST
+    string "Firebase Auth emulator host:port (empty = production)"
+    default ""
+config WEBCAM_STUN_URL
+    string "STUN server URL (empty disables)"
+    default "stun:stun.l.google.com:19302"
+    help
+        STUN server used by the ESP ICE agent. Keep it aligned with the
+        observation page's ICE_SERVERS in tolo-web. STUN only discovers the
+        server-reflexive address; TURN relay and authentication are not
+        configured. Leave empty on a LAN without Internet access to use host
+        candidates only.
+config TAB5_VIDEO_FPS
+    int "H.264 capture and send FPS"
+    range 6 30
+    default 15
+config TAB5_VIDEO_BITRATE
+    int "H.264 target bitrate (bps)"
+    range 300000 8000000
+    default 2000000
+config TAB5_VIDEO_GOP
+    int "H.264 keyframe interval (frames)"
+    range 1 300
+    default 15
+endmenu

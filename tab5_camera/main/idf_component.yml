@@ -1,0 +1,6 @@
+dependencies:
+  idf: "==6.1.0"
+  espressif/cjson: "^1.7.19~2"
+  espressif/esp_video: "~2.3.0"
+  espressif/esp_io_expander_pi4ioe5v6408: "*"
+  espressif/esp_wifi_remote: "~1.6"
