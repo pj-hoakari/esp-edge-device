@@ -69,6 +69,7 @@ static int open_peer(void)
     esp_peer_default_cfg_t extra = {
         .agent_recv_timeout = 1,
         .keep_role = true,
+        .alive_binding_retries = 2,
         .data_ch_cfg = {.cache_timeout = 250, .recv_cache_size = 4096, .send_cache_size = 4096},
     };
     bool use_stun = CONFIG_WEBCAM_STUN_URL[0] != '\0';
