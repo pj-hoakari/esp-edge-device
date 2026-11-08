@@ -7,14 +7,12 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-#include "driver/i2c_master.h"
+#include "bsp/m5stack_tab5.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "esp_io_expander_pi4ioe5v6408.h"
 #include "esp_video_device.h"
-#include "esp_video_init.h"
 #include "linux/videodev2.h"
 #include "sdkconfig.h"
 
@@ -23,36 +21,15 @@
 
 static const char *TAG = "tab5cam";
 
-static i2c_master_bus_handle_t i2c_bus;
 static int cap_fd = -1, enc_fd = -1;
 static uint8_t *cap_buffers[CAPTURE_BUFFERS];
 static uint8_t *enc_buffer;
 static QueueHandle_t frames;
 
-static esp_err_t expander_output(uint32_t address, uint32_t pin, bool level)
-{
-    esp_io_expander_handle_t expander = NULL;
-    ESP_RETURN_ON_ERROR(esp_io_expander_new_i2c_pi4ioe5v6408(i2c_bus, address, &expander), TAG, "expander");
-    esp_err_t err = esp_io_expander_set_dir(expander, pin, IO_EXPANDER_OUTPUT);
-    if (err == ESP_OK) err = esp_io_expander_set_level(expander, pin, level);
-    if (err == ESP_OK) err = esp_io_expander_set_output_mode(expander, pin, IO_EXPANDER_OUTPUT_MODE_PUSH_PULL);
-    esp_io_expander_del(expander);
-    return err;
-}
-
 esp_err_t tab5_board_init(void)
 {
-    i2c_master_bus_config_t bus = {
-        .i2c_port = I2C_NUM_1,
-        .sda_io_num = GPIO_NUM_31,
-        .scl_io_num = GPIO_NUM_32,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .flags.enable_internal_pullup = true,
-    };
-    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus, &i2c_bus), TAG, "i2c");
-    ESP_RETURN_ON_ERROR(expander_output(ESP_IO_EXPANDER_I2C_PI4IOE5V6408_ADDRESS_HIGH, IO_EXPANDER_PIN_NUM_0, true), TAG, "wifi power");
-    ESP_RETURN_ON_ERROR(expander_output(ESP_IO_EXPANDER_I2C_PI4IOE5V6408_ADDRESS_LOW, IO_EXPANDER_PIN_NUM_6, true), TAG, "camera power");
-    vTaskDelay(pdMS_TO_TICKS(100));
+    ESP_RETURN_ON_ERROR(bsp_i2c_init(), TAG, "i2c");
+    ESP_RETURN_ON_ERROR(bsp_feature_enable(BSP_FEATURE_WIFI, true), TAG, "wifi power");
     return ESP_OK;
 }
 
@@ -142,13 +119,7 @@ static void capture_task(void *arg)
 
 esp_err_t camera_h264_start(void)
 {
-    const esp_video_init_csi_config_t csi = {
-        .sccb_config = {.init_sccb = false, .i2c_handle = i2c_bus, .freq = 400000},
-        .reset_pin = -1,
-        .pwdn_pin = -1,
-    };
-    const esp_video_init_config_t video = {.csi = &csi};
-    ESP_RETURN_ON_ERROR(esp_video_init(&video), TAG, "esp_video_init");
+    ESP_RETURN_ON_ERROR(bsp_camera_start(NULL), TAG, "camera");
 
     cap_fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDONLY);
     enc_fd = open(ESP_VIDEO_H264_DEVICE_NAME, O_RDONLY);

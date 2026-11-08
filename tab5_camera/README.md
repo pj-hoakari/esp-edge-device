@@ -4,12 +4,13 @@ M5Stack Tab5 の内蔵カメラの映像を、P4 のハードウェアエンコ�
 観測ページは連続観測でこの映像を推論する。
 
 認可（RFC 8628）、Edge Bridge 経由の Firestore シグナリング、シリアルでのネットワーク・クラウド設定は `../esp_webcam/main/` のソースをそのまま使う。
-Tab5 固有のコードは `main/` の 3 ファイルだけである。
+Tab5 固有のコードは `main/` の 4 ファイルと、`components/m5stack_tab5/` に置いた BSP である。
 
 | ファイル | 役割 |
 |---|---|
 | `main/tab5_main.c` | 起動順序（NVS、シリアル設定、IO エキスパンダ、ESP32-C6、カメラ、Wi-Fi、WebRTC） |
-| `main/camera_h264.c` | IO エキスパンダでカメラと Wi-Fi の電源を入れ、MIPI-CSI の SC202CS から V4L2 で取り込み、H.264 デバイスでエンコードする |
+| `main/camera_h264.c` | BSP でカメラと Wi-Fi の電源を入れ、MIPI-CSI の SC202CS から V4L2 で取り込み、H.264 デバイスでエンコードする |
+| `main/status_display.c` | 画面に Wi-Fi の接続状態（SSID と IP アドレスを含む）と、観測ページに映像を送っているか（Observing / Not observing）を出す。カメラ映像は出さない |
 | `main/webrtc_h264.c` | `webrtc.h` の実装。観測ページの offer に `sendonly` の H.264 で応答し、エンコード済みフレームを送る |
 
 ## 対象と前提
@@ -52,6 +53,13 @@ Wi-Fi が使えない状態でも書き込めるよう、イメージは P4 の�
 古い C6 は `activate` に対応しないが、`end` の後の再起動で新しいファームウェアに切り替わる。
 起動ログに `host=3.1.0 coprocessor=3.1.0 (match)` が出れば更新済みである。
 
+## BSP
+
+`components/m5stack_tab5/` は Espressif の Tab5 BSP 1.3.2（Apache-2.0）をそのまま置いたもので、`idf_component.yml` の `esp_video` だけを `~2.3.0` に変えている。
+配布版の BSP は `esp_video ~2.0` に固定されていて、このプロジェクトの依存と両立しないためである。
+LCD はボードの版ごとに異なる（ILI9881C、ST7123、ST7121）。BSP がタッチコントローラーの応答から版を判定して初期化する。
+LVGL の描画バッファは PSRAM に置く。BSP 既定の内部 DMA メモリに置くと、H.264 エンコーダが参照フレーム用のメモリを確保できず、カメラが起動しない。
+
 ## rev v1.x 向けの調整
 
 Tab5 の P4 は rev v1.3 で、rev v3 の命令（Zba/Zbb）を実行できない。
@@ -73,4 +81,5 @@ riscv32-esp-elf-objdump -d build/tab5_camera.elf \
 - esp_video の H.264 デバイスはキーフレームの強制に対応していない。
   接続直後と PLI の後は、次の I フレーム（既定で最大 1 秒）まで観測ページに映像が出ない。
 - CCM を外しているので、色は既定の IPA 設定より不正確になる。
-- 画面への表示、音声、タッチは使わない。
+- 画面の文字は英語だけである。LVGL 組み込みの Montserrat フォントに日本語の字形がないため、日本語を含む SSID は正しく表示されない。
+- 音声とタッチは使わない。

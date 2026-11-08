@@ -7,6 +7,7 @@
 #include "esp_wifi.h"
 #include "eh_host_core.h"
 #include "camera_h264.h"
+#include "status_display.h"
 #include "cloud_settings.h"
 #include "device_auth.h"
 #include "network_settings.h"
@@ -28,12 +29,14 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *event = data;
         ESP_LOGW(TAG, "Wi-Fi disconnected: reason %d, rssi %d", event->reason, event->rssi);
+        status_display_wifi_disconnected(event->reason);
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = data;
         ESP_LOGI(TAG, "Wi-Fi connected: " IPSTR, IP2STR(&event->ip_info.ip));
+        status_display_wifi_connected(event->ip_info.ip.addr);
     }
 }
 
@@ -46,6 +49,7 @@ void app_main(void)
     device_auth_initialize();
     network_settings_console_start();
     ESP_ERROR_CHECK(tab5_board_init());
+    if (status_display_start(network_settings_active()->ssid) != ESP_OK) printf("Status display unavailable.\n");
     if (eh_host_init(NULL) != 0 || eh_host_connect_to_slave() != 0) {
         printf("ESP32-C6 Wi-Fi co-processor did not respond.\n");
         return;
