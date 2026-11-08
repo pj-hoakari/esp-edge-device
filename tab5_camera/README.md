@@ -41,6 +41,17 @@ esptool --port /dev/cu.usbmodem101 erase-region 0x10000 0x1000
 コマンドは `esp_webcam` と同じで、`help` で一覧を出す。
 Web Serial による管理 UI からのプロビジョニングも同じポートで行う。
 
+## ESP32-C6 のファームウェア
+
+C6 には、P4 側と同じ esp_hosted 3.1.0 のコプロセッサファームウェアが要る。
+工場出荷時の C6（esp_hosted 1.4 系）のままでは、起動時に `major version mismatch` が出る。接続から 20〜40 秒で SDIO の受信が止まり（`SDIO RX read (3072 bytes) exceeds staging target (1536 bytes)`）、Wi-Fi が戻らない。
+P4 側の SDIO 受信モードを変えても回避できなかった。
+
+更新は esp_hosted の `examples/ota/coprocessor_ota/cp` を `esp32c6` 向けに、esp_hosted を `==3.1.0` に固定してビルドし、P4 から SDIO 経由の OTA（begin / write / end）で書き込む。
+Wi-Fi が使えない状態でも書き込めるよう、イメージは P4 のフラッシュの空き領域に置いて読み出す。
+古い C6 は `activate` に対応しないが、`end` の後の再起動で新しいファームウェアに切り替わる。
+起動ログに `host=3.1.0 coprocessor=3.1.0 (match)` が出れば更新済みである。
+
 ## rev v1.x 向けの調整
 
 Tab5 の P4 は rev v1.3 で、rev v3 の命令（Zba/Zbb）を実行できない。
