@@ -48,10 +48,33 @@ C6 には、P4 側と同じ esp_hosted 3.1.0 のコプロセッサファーム�
 工場出荷時の C6（esp_hosted 1.4 系）のままでは、起動時に `major version mismatch` が出る。接続から 20〜40 秒で SDIO の受信が止まり（`SDIO RX read (3072 bytes) exceeds staging target (1536 bytes)`）、Wi-Fi が戻らない。
 P4 側の SDIO 受信モードを変えても回避できなかった。
 
-更新は esp_hosted の `examples/ota/coprocessor_ota/cp` を `esp32c6` 向けに、esp_hosted を `==3.1.0` に固定してビルドし、P4 から SDIO 経由の OTA（begin / write / end）で書き込む。
-Wi-Fi が使えない状態でも書き込めるよう、イメージは P4 のフラッシュの空き領域に置いて読み出す。
-古い C6 は `activate` に対応しないが、`end` の後の再起動で新しいファームウェアに切り替わる。
-起動ログに `host=3.1.0 coprocessor=3.1.0 (match)` が出れば更新済みである。
+C6 のファームウェアは `c6_coprocessor/` でビルドする。
+esp_hosted の `examples/wifi/enterprise/cp` をもとに esp_hosted を `==3.1.0` に固定し、802.1X/EAP を S3 版と同じ設定で有効にしてある（`ESP_WIFI_ENTERPRISE_SUPPORT`、`ESP_WIFI_MBEDTLS_TLS_CLIENT`、`ESP_WIFI_SUITE_B_192`、証明書バンドル）。
+
+```sh
+cd c6_coprocessor
+idf.py set-target esp32c6
+idf.py build
+```
+
+C6 への書き込みは、P4 から SDIO 経由の OTA（begin / write / end / activate）で行う。
+Wi-Fi が使えない状態でも書き込めるよう、イメージは P4 のフラッシュの空き領域（`0x620000` 以降）に置いて読み出す。
+工場出荷時の 1.4 系の C6 は `activate` に対応しないが、`end` の後の再起動で新しいファームウェアに切り替わる。
+起動ログに `host=3.1.0 coprocessor=3.1.0 (match)` と `eh_wifi_ent: wifi enterprise ext init` が出れば更新済みである。
+
+## 802.1X/EAP
+
+EAP の設定と接続は C6 が行い、P4 は `wifi_auth.c`（S3 版と共有）の設定を RPC で C6 に渡す。
+P4 側は `CONFIG_ESP_HOSTED_HOST_FEAT_WIFI_EXT_ENT` でこの RPC を有効にし、C6 側は `c6_coprocessor/` のファームウェアが要る。
+シリアルの `eap`、`credential`、`protocols` は S3 版と同じで、`protocols` は TLS、PEAP、TTLS の各方式と、WPA/WPA2/WPA3/Suite-B を表示する。
+EAP-FAST は S3 版と同じく通常版には入らない。
+
+esp_hosted 3.1.0 は、EAP の RPC を呼ぶ関数（`esp_eap_client_remote_*`）を静的ライブラリ `esp_wifi_remote_glue` に入れているが、リンカに残す指定をしていない。
+そのままでは esp_wifi_remote の弱い定義（`ESP_ERR_NOT_SUPPORTED` を返す）が使われる。
+`CMakeLists.txt` でこのライブラリを `--whole-archive` でリンクしている。
+
+C6 が EAP の各設定（identity、username、TTLS の phase 2、証明書バンドル、Suite-B）を受け付けることは確かめた。
+802.1X のアクセスポイントへの接続は確かめていない。
 
 ## BSP
 

@@ -22,3 +22,8 @@ foreach(link_property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
 endforeach()
 target_link_directories(${peer_lib} PUBLIC
     "${WEBCAM_DIR}/vendor/esp-webrtc-solution/components/esp_peer/libs/${IDF_TARGET}")
+
+if(TARGET esp_wifi_remote_glue)
+    target_link_libraries(${CMAKE_PROJECT_NAME}.elf PRIVATE
+        "-Wl,--whole-archive" "$<TARGET_FILE:esp_wifi_remote_glue>" "-Wl,--no-whole-archive")
+endif()
