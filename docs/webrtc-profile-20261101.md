@@ -1,7 +1,13 @@
 # WebRTC実機プロファイル（2026-11-01）
 
+> 2026-11-01 の実機測定記録。現在の目標は 1280×720・最低 6fps、送信目標 10fps。
+> 現行の運用は [`../esp_webcam/README.md`](../esp_webcam/README.md) を参照する。
+
+測定には当時の viewer-server の受信画面を使用した。現在の観測ページは
+tolo-web 側を使う。
+
 カラー1280×720、UVC入力10fps、送信目標10fps、再送0のDataChannelで測定した。
-JTAGは使用せず、COM3のPico debugprobe UART、HTTP診断、専用のChrome headlessを使用した。
+JTAGは使用せず、Pico debugprobe UART、HTTP診断、専用のChrome headlessを使用した。
 Chromeでは製品の受信コードでJPEGをデコードし、video canvasのdrawImage完了を数える。
 ESPの送信API成功数や設定fpsを描画fpsとして代用しない。
 
@@ -105,12 +111,13 @@ ICE/DTLSの接続処理中は元の待ち方を維持する。peerタスクの1m
 リンク時のwrapで既存関数を呼び出すため、IPv4/IPv6・ソケット利用数・受信処理を複製しない。
 
 リポジトリ直下でviewer-serverを起動した状態から、Node.js（組込みWebSocket対応）で実行する。
-Windowsの標準Chromeパスを使用し、ユーザーのブラウザとは別の専用プロファイルを作成する。
+測定時は Windows 版 Chrome を使用し、ユーザーのブラウザとは別の専用プロファイルを作成した。
+`benchmark-browser.mjs` は Chrome の実行パスを直接指定するため、別の環境ではパスを変更する。
 
-```powershell
-$env:ESP_URL='http://192.168.137.145'
-$env:SECONDS='180'
-$env:RESULT_FILE='esp_webcam/.tools/benchmark.json'
+```sh
+ESP_URL=http://192.168.137.145 \
+SECONDS=180 \
+RESULT_FILE=esp_webcam/.tools/benchmark.json \
 node viewer-server/tools/benchmark-browser.mjs
 ```
 
@@ -120,10 +127,10 @@ headlessでのデコード・canvas描画を確認する検査であり、物理
 実際の設置環境でも同じviewerでの確認が必要。
 
 UARTログはESP-IDFのPython環境から次で保存できる。DTR有効、物理タイムアウト固定、115200bps。
-sdkconfigにあるWi-Fi認証情報は保存前に伏せる。
+sdkconfigにあるWi-Fi認証情報は保存前に伏せる。`PORT` は環境に合わせる。
 
-```powershell
-python esp_webcam/tools/monitor_debugprobe.py --port COM3 --seconds 60 --output esp_webcam/.tools/uart.log
+```sh
+python esp_webcam/tools/monitor_debugprobe.py --port PORT --seconds 60 --output esp_webcam/.tools/uart.log
 ```
 
 UVCが無応答のまま止まった実例があったため、3秒間フレームなし、または5秒間有効JPEGなしで

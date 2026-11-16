@@ -1,11 +1,17 @@
 # WebRTC送信高速化（2026-11-01）
 
+> 2026-11-01 の高速化記録。現在の目標は 1280×720・最低 6fps、送信目標 10fps。
+> 現行の運用は [`../esp_webcam/README.md`](../esp_webcam/README.md) を参照する。
+
+当時は viewer-server の HTTP シグナリングを使用した。現在は tolo-edge-bridge の
+Firestore 方式を使う。
+
 後続のUART/HTTP実機プロファイルと暗号方式の比較は
 [実機プロファイル](webrtc-profile-20261101.md)に記録した。
 以下は初回高速化と30秒測定の記録で、最新方式はChaCha20-Poly1305優先へ変更している。
 
 要件はカラーHD 1280×720を維持し、静止時も描画6fps以上。既定はUVC受信10fps・
-送信目標10fpsに変更した。当初は実機不在だったが、同日にCOM3のPico debugprobe UART経由で
+送信目標10fpsに変更した。当初は実機不在だったが、同日にPico debugprobe UART経由で
 ESP32-S3へ書き込み、全3領域のハッシュ照合に成功した。
 通常起動とWebRTC開通も確認した。下記30秒測定では平均6fpsを超えたが、
 5秒区間では6fpsを下回り、常時維持の要件は未達。
@@ -64,7 +70,7 @@ Wi-Fi認証情報を含むローカルsdkconfig・ファームウェアを公開
 - `viewer-server`で`node --test tests/*.test.mjs`：13件成功。
   断片の交錯、uint32ラップ、組立メモリの上限、デコード待ち最新フレーム、
   描画のみACK、切断後の古いデコード結果破棄、中継APIとICE候補を検証。
-- `esp_webcam/tests/sender_policy_test.c`：MSVCの`cl /W4 /O2`で実行成功。
+- `esp_webcam/tests/sender_policy_test.c`：C11コンパイラで実行成功。
   6〜15fpsの10,000周期ずつで起床遅れの非累積、停止後の周期スキップ、
   UDPの回復・最大2ms待機・再試行通知・即時エラーを実コードで確認。
 - ESP-IDF v6.1 / ESP32-S3のビルド・リンク成功。app 1,161,584 bytes（0x11b970）、
@@ -88,7 +94,7 @@ Wi-Fi認証情報を含むローカルsdkconfig・ファームウェアを公開
 
 ## 同日実機測定
 
-COM3のPico debugprobe UART経由で書き込み・全3領域ハッシュ照合後、通常起動を確認。
+Pico debugprobe UART経由で書き込み・全3領域ハッシュ照合後、通常起動を確認。
 DHCP IPは今回`192.168.137.145`。`/status`では720p・設定10fps、633枚受信すべて有効JPEG、
 USB転送エラー0、バッファ超過0。WebRTCはpeer_state=10、channel_open=true。
 

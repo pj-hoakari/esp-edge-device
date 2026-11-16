@@ -1,4 +1,8 @@
-# シリアル設定と802.1X/EAP対応（2026-11-02）
+# シリアル設定と802.1X/EAP対応
+
+> 802.1X/EAP の実装記録。現行のビルド・設定手順は
+> [`../esp_webcam/README.md`](../esp_webcam/README.md) を参照する。
+> 2026-11-02 作成、2026-11-16 更新。
 
 ESP32-S3 / ESP-IDF v6.1向け。従来の`wifi`（通常のSSID・PSK設定）に加え、
 公開APIで選択できる802.1X/EAP方式を`eap`から設定する。接続先の認証情報はシリアルで入力し、
@@ -78,13 +82,14 @@ SDKのPAC APIは512バイト未満のデータを空PACに置換するため、�
 
 EAPプロファイルを先に設定してから端末を切断し、リポジトリ直下で実行する。
 秘密鍵を暗号化している場合は、先に`eap`でその復号パスワードを保存しておく。
+`PORT` は環境に合わせたポート名に置き換える。
 
-```powershell
-python esp_webcam/tools/upload_wifi_credential.py --port COM3 ca C:\wifi-certs\ca.pem
-python esp_webcam/tools/upload_wifi_credential.py --port COM3 client C:\wifi-certs\client.pem
-python esp_webcam/tools/upload_wifi_credential.py --port COM3 key C:\wifi-certs\client.key
+```sh
+python esp_webcam/tools/upload_wifi_credential.py --port PORT ca ca.pem
+python esp_webcam/tools/upload_wifi_credential.py --port PORT client client.pem
+python esp_webcam/tools/upload_wifi_credential.py --port PORT key client.key
 # FAST互換版のみ
-python esp_webcam/tools/upload_wifi_credential.py --port COM3 pac C:\wifi-certs\client.pac
+python esp_webcam/tools/upload_wifi_credential.py --port PORT pac client.pac
 ```
 
 転送ツールは`credential <種類>`を実行し、48バイトずつBase64化して行単位で受領応答を待つ。
@@ -98,7 +103,9 @@ PEM/秘密鍵の解析に失敗した場合は旧資材を置き換えない。N
 
 NVSは従来の24KiBを使う。大きな資材の複数保存・更新は空き不足で失敗することがある。
 その場合は不要な資材だけを消去する。既存ネットワーク設定やRTC調整を全消去する処理は追加していない。
-NVS暗号化は未追加なので、実機やフラッシュ読み出しデータの取り扱いには保存した認証情報が含まれる。
+NVSは既定でXTS-AES暗号化される。詳細と移行手順は
+[`nvs-encryption.md`](nvs-encryption.md) を参照する。実機やフラッシュ読み出しデータの
+取り扱いには、保存した認証情報が含まれることを前提にする。
 
 ## ビルドと互換性
 
@@ -109,17 +116,18 @@ NVS暗号化は未追加なので、実機やフラッシュ読み出しデー�
 FAST互換版は同じディレクトリから次のように別の設定ファイル・出力先でビルドする。
 現在の通常版の設定・成果物を上書きしない。
 
-```powershell
+```sh
 idf.py -B ../build-fast -DSDKCONFIG=sdkconfig.fast '-DSDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.fast.defaults' build
 ```
 
 `sdkconfig.fast.defaults`はWi-Fi TLSクライアントを内部実装に切り替え、Suite-Bを無効にする。
 生成される`sdkconfig.fast`と`../build-fast/`はGit除外。実機へ書く場合はそのビルドの
 bootloader・partition table・appをセットで使用する。
-Pico debugprobeの安定化ラッパーでも出力先を指定できる。書き込みモードにして、リポジトリ直下で実行する。
+Pico debugprobeの安定化ラッパーでも出力先を指定できる。書き込みモードにして、
+リポジトリ直下で実行する。`PORT` は環境に合わせたポート名に置き換える。
 
-```powershell
-python esp_webcam/tools/flash_debugprobe.py --port COM3 --build-dir build-fast
+```sh
+python esp_webcam/tools/flash_debugprobe.py --port PORT --build-dir build-fast
 ```
 
 ネットワーク設定blobはv2へ拡張した。稼働中のv1 blob（328バイト）は明示的に移行して読み、
@@ -143,7 +151,7 @@ EAPライブラリ自身のメモリと認証中のCPU負荷は実ネットワ�
 - `tests/test_credential_upload.py`：分割された応答、PEM・バイナリPAC転送、OpenSSLテキスト付きチェーン、失敗時のポート解放の4テスト。
 - 既存の受信・描画・中継13テスト成功。
 
-通常版をCOM3のPico debugprobe UART経由でESP32-S3 rev.0.2へ書き込み、
+通常版をPico debugprobe UART経由でESP32-S3 rev.0.2へ書き込み、
 bootloader・partition table・appのハッシュ照合に成功した。IO0解除・ENリセットで通常起動。
 実機では次を確認した。
 
@@ -154,6 +162,6 @@ bootloader・partition table・appのハッシュ照合に成功した。IO0解�
 - SDKのクライアント証明書には可読メタデータが付属していたため、転送ツールのPEM抽出も実機で確認した。
 - 確認用の資材をすべて消去し、全スロットが未保存状態へ戻ったことを確認。接続プロファイルは変更していない。
 
-確認後はログ停止状態でCOM3を解放した。FAST互換版はビルド・ELF確認までで、実機へは書き込んでいない。
+確認後はログ停止状態でポートを解放した。FAST互換版はビルド・ELF確認までで、実機へは書き込んでいない。
 PCテストのTLS/NVS/UARTはアダプターで置き換えているため、認証サーバーとの相互運用確認ではない。
 実ネットワークでの各EAP方式・証明書検証・再認証・WPA3/Suite-B・FAST・映像性能は未確認。

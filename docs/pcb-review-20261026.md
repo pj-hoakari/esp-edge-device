@@ -1,10 +1,13 @@
 # PCBと映像配信構成の再レビュー
 
 > 2026-10-31追記：本書は10月26日時点のレビュー記録である。現在の依頼は
-> カラーHD（1280×720）・2fps以上の維持を目指すJPEGをWebRTC DataChannelで配信する方式に変更された。
+> カラーHD（1280×720）・6fps以上の維持を目指すJPEGをWebRTC DataChannelで配信する方式に変更された。
 > `../esp_webcam/README.md` に新しいファームウェアと検証手順を記載した。
 > 本書の「一般的な映像トラック」要件と「ファームウェアなし」は当時の状態を指す。
 > 基板に関する未解決事項は引き続き残っている。
+>
+> 2026-11-16 時点の CLI 結果：ERC 0、未配線 0、回路図との不一致 0、
+> DRC 14 件（穴径 12・シルク 2）。
 
 2026-10-26、KiCad CLI 10.0.7で確認した。対象は16:17保存の基板と16:03保存の回路図。
 カメラ・解像度・fpsは未定。受信側は、ユーザーの指定により一般的なWebRTC映像トラックとする。
@@ -166,11 +169,11 @@ GitHubのmaster/mainとlatest文書は変わるため、実装時にはリリー
 
 ```sh
 kicad-cli version
-report_dir=$(mktemp -d /tmp/esp-webcam-review.XXXXXX)
-kicad-cli sch erc --exit-code-violations --output "$report_dir/erc.rpt" esp_webcam.kicad_sch
-kicad-cli pcb drc --refill-zones --schematic-parity --exit-code-violations --output "$report_dir/drc.rpt" esp_webcam.kicad_pcb
-kicad-cli sch export netlist --format kicadxml --output "$report_dir/net.xml" esp_webcam.kicad_sch
+report_dir=$(mktemp -d)
+kicad-cli sch erc --exit-code-violations --output "$report_dir/erc.rpt" board/esp_webcam.kicad_sch
+kicad-cli pcb drc --refill-zones --schematic-parity --exit-code-violations --output "$report_dir/drc.rpt" board/esp_webcam.kicad_pcb
+kicad-cli sch export netlist --format kicadxml --output "$report_dir/net.xml" board/esp_webcam.kicad_sch
 ```
 
-今回の一時レポートは `/tmp/esp-webcam-rereview/` に保存した。
+当時の一時レポートは保存していない。
 確認対象PCBのSHA-256: `72645f23bee5017379e707370f39c43a8e358dafda44b348f0339a163bf089e4`。

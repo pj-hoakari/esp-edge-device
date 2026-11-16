@@ -1,4 +1,8 @@
-# ESP32-S3 を tolo-edge-bridge / tolo-web につなぐ（2026-11-02）
+# ESP32-S3 を tolo-edge-bridge / tolo-web につなぐ
+
+> 現行のシグナリング・認可仕様。ビルド・書き込み・設定の入口は
+> [`../esp_webcam/README.md`](../esp_webcam/README.md)。
+> 2026-11-02 作成、2026-11-16 更新。
 
 ## 構成
 
@@ -56,7 +60,20 @@ Firestore が 401/403 を返したときも、現在の event_access でカス�
 Refresh Token の期限は24時間で、承認から7日を超えない。7日を過ぎたら再承認する。
 
 トークンと Refresh Token は `cloud` 名前空間に保存し、UART・HTTPログ・`show` には出さない。
-`show` で確認できるのは種別と有効期限、認可状態だけとする。
+`show` で確認できるのは種別と有効期限、認可状態だけとする。NVS は既定で
+XTS-AES 暗号化される（[`nvs-encryption.md`](nvs-encryption.md)）。
+
+### 認可失敗時の扱い
+
+- 資格情報を送る経路は HTTPS を必須にする。`CONFIG_WEBCAM_ALLOW_INSECURE_HTTP` の
+  既定は `n` で、HTTP へ自動リダイレクトしない。HTTP はローカル開発時だけ明示する。
+- `invalid_grant`、grant 期限切れ、再承認が必要な状態では送信を止め、peer を切断し、
+  送信途中の JPEG・offer・answer を破棄する。認可タスクから peer API は呼ばない。
+- 再承認後は Firebase セッションと SDP を引き継がず、新しい接続を待つ。
+- Web Serial の `device_authorization` は長さ 1 のキューへ要求を入れ、HTTP/TLS・
+  認可処理・`user_code` の出力は cloud タスクで行う。キュー満杯または cloud
+  ワーカー未起動なら `authorization_queue_full_or_unavailable` を返す。
+- 認可開始の大きな作業領域はヒープへ置く。トークン本文はログに出さない。
 
 ## Firestore の契約
 
@@ -126,12 +143,11 @@ JSON Lines は `config` / `status` / `device_authorization` / `reboot` に対応
 設定成功時は `{"type":"config_result","ok":true}` の約500ms後に再起動する。
 Wi-Fi パスワードとトークンは JSON にもログにも出さない。
 
-- トークンと Refresh Token は NVS の `cloud` 名前空間に平文で保存する。NVS 暗号化は未対応。
-  EAP の証明書を保存している場合、`cloud` の blob と合わせて NVS の空きを確認する。
-  足りない場合は NVS パーティションを広げる
+- EAP の証明書を保存している場合、`cloud` の blob と合わせて NVS の空きを確認する。
+  足りない場合は不要な資材を消去する
 - `cloud` の v1 blob は v2 へ移行する。未知の版・サイズは再解釈せず、ビルド既定値へ戻す
 - エミュレータを使う場合、Firestore / Auth のホストは ESP から到達できる PC の LAN IP
-  （例: `192.168.1.20:8080`）か、`https://host` 形式のトンネル URL を指定する。
+  （例: `192.168.1.20:8080`）か、LAN 内の HTTPS リバースプロキシの URL を指定する。
   `127.0.0.1` は ESP 自身を指すため使えない。
   API key はエミュレータなら任意の非空文字列（例: `demo-key`）でよい
 - 時刻は SNTP（`pool.ntp.org`）で合わせる。オフラインでは `clock` で手動設定する
@@ -170,34 +186,31 @@ Wi-Fi パスワードとトークンは JSON にもログにも出さない。
 7. `/status` で `valid_jpegs` と `transfer_errors` を確認
 8. `show` で `Authorization: approved` と event_access / Refresh Token の有無を確認
 
-## COM ポートからの書き込み
+## シリアルポートからの書き込み
 
 通常の USB-UART / USB Serial/JTAG ポートから書き込む場合は `tools/flash_serial.py` を使う。
+`PORT` は環境に合わせたポート名に置き換える。
 `build/flasher_args.json` があればオフセットと flash 設定をそこから読む。
 
-```bash
+```sh
 cd esp_webcam
 # ESP-IDF の Python 環境で
-python tools/flash_serial.py --port COM5 --check   # 接続確認
-python tools/flash_serial.py --port COM5           # 書き込み
-python tools/flash_serial.py --port COM5 --erase   # 全消去してから書き込み
-python tools/flash_serial.py --port COM5 --build-dir build-fast
+python tools/flash_serial.py --port PORT --check   # 接続確認
+python tools/flash_serial.py --port PORT           # 書き込み
+python tools/flash_serial.py --port PORT --erase   # 全消去してから書き込み
+python tools/flash_serial.py --port PORT --build-dir build-fast
 ```
 
 `--after no_reset` などが必要なボードでは指定する。Pico debugprobe の UART 経由は
-従来どおり `tools/flash_debugprobe.py` を使う（no-reset と CDC のタイムアウト制御が
-必要なため）。
+`tools/flash_debugprobe.py` を使う（no-reset と CDC のタイムアウト制御が必要なため）。
 
-### macOS から Pico debugprobe 経由で書き込む例
+`flash_serial.py` が使えない場合は、ビルドディレクトリで esptool を直接使う。
 
-`/dev/cu.usbmodem*` を `--port` に指定する。ESP-IDF 5.5 同梱の esptool 4.12 では
-接続できない場合があるため、esptool 5.6（`uvx`）で `--before no-reset` を使う。
-
-```bash
+```sh
 cd esp_webcam/build
-uvx --from esptool esptool --chip esp32s3 --port /dev/cu.usbmodem3102 \
+uvx --from esptool esptool --chip esp32s3 --port PORT \
   --baud 115200 --before no-reset --after no-reset write-flash @flash_args
-uvx --from esptool esptool --chip esp32s3 --port /dev/cu.usbmodem3102 \
+uvx --from esptool esptool --chip esp32s3 --port PORT \
   --baud 115200 --before no-reset --after no-reset verify-flash @flash_args
 ```
 
@@ -206,14 +219,12 @@ uvx --from esptool esptool --chip esp32s3 --port /dev/cu.usbmodem3102 \
 
 ## ビルド（ESP-IDF v6.1）
 
-新しいファイル（`device_auth.c` / `device_auth_values.c` / `cloud_settings_values.c`）は
-`esp_webcam/main/` に追加済みで、`CMakeLists.txt` の `SRCS` も更新してある。
-ESP-IDF 側では次を実行する。
+`esp_webcam/` で次を実行する。
 
-```bash
+```sh
 git submodule update --init --recursive
 idf.py set-target esp32s3
-idf.py reconfigure   # 新しい Kconfig（WEBCAM_EDGE_DEVICE_ID など）を反映
+idf.py reconfigure   # Kconfig の項目を追加・変更したとき
 idf.py build
 ```
 
@@ -222,6 +233,7 @@ idf.py build
 `ESP webcam` で Edge Bridge URL・edgeDeviceId・Firebase project/API key・
 emulator ホストを入力する。シリアルで設定する場合は空のままでよい。
 
-ビルド後は通常どおり UART 経由で書き込む。Pico debugprobe の配線と IO0/EN の
-操作は `esp_webcam/README.md` を参照する。書き込み後、Web Serial またはシリアルで
-Wi-Fi・signaling・IdP・Firebase・`edge_device_id` を設定し、`reboot` する。
+ビルド後は UART 経由で書き込む。Pico debugprobe の配線と IO0/EN の操作は
+[`../esp_webcam/README.md`](../esp_webcam/README.md) を参照する。書き込み後、
+Web Serial またはシリアルで Wi-Fi・signaling・IdP・Firebase・`edge_device_id` を
+設定し、`reboot` する。

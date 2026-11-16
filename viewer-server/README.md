@@ -1,5 +1,7 @@
-> 旧方式のシグナリングサーバー。ESP は現在 tolo-edge-bridge の Firestore
-> シグナリングを使うため、このサーバーは使用しない。記録として残している。
+> 旧方式のシグナリングサーバー。現在のファームウェアは tolo-edge-bridge の
+> Firestore シグナリングを使うため、このサーバーには接続しない。当時の記録として残す。
+> 現行の仕様は [`../docs/tolo-edge-bridge-20261102.md`](../docs/tolo-edge-bridge-20261102.md)
+> を参照する。
 
 # WebRTCビューアー / シグナリングサーバー
 
@@ -8,7 +10,7 @@ ESP32とブラウザのSDPを中継する。ESP32のHTTPサーバーはビュー
 
 ## 起動
 
-```powershell
+```sh
 cd viewer-server
 npm start
 ```
@@ -23,8 +25,8 @@ npm start
 | `STUN_URL` | `stun:stun.l.google.com:19302` | ビューアーとESPで使うSTUN。カンマ区切りで複数指定可 |
 | `OFFER_TTL_MS` | `120000` | offerを保持する時間 |
 
-ESP32側の`Signaling server URL`にはこのサーバーのベースURLを設定する。
-例: `http://192.168.137.1:8080`。ESP32側の`STUN server URL`も同じSTUNに合わせる。
+当時の ESP32 側設定では、`Signaling server URL` にこのサーバーのベースURLを設定した。
+例: `http://192.168.137.1:8080`。STUN も同じ設定に合わせた。
 
 ## シグナリングAPI
 
@@ -47,11 +49,11 @@ STUNが使えないネットワークではホスト候補のみで接続する�
 
 ## テスト
 
-```powershell
+```sh
 npm test
 ```
 
-`public/receiver.js`のJPEG分割復元・動きスコア、シグナリングAPIの中継、
+`public/receiver.js`のJPEG分割復元、描画ACK、シグナリングAPIの中継、
 `.local`候補の展開を確認する。
 
 ## 2026-11-01の高速化
@@ -60,4 +62,4 @@ HDのまま常時6fps以上を目標とし、ESPの既定送信目標は10fps。
 受信は最大3フレーム分のunordered断片を組み立て、デコード待ちには最新1枚だけ保持する。
 ブラウザの動き検出と画像読み戻しは行わず、canvas描画後だけACKする。
 画面は直近約1秒のfpsと接続後平均fpsを表示する。
-実機不在のため達成fpsは未測定。[実測手順と変更内容](../docs/webrtc-performance-20261101.md)を参照。
+実測結果は[実機プロファイル](../docs/webrtc-profile-20261101.md)を参照する。
